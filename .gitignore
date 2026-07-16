@@ -1,0 +1,62 @@
+# ==========================================
+# 1. R / RStudio Workspace & History (Never track)
+# ==========================================
+.Rhistory
+.RData
+.Ruserdata
+.Rresources
+.Rproj.user/
+
+# ==========================================
+# 2. Local App / IDE / Environment Secrets
+# ==========================================
+.webui_secret_key
+foldersandfilelist.txt
+.posit/
+
+# ==========================================
+# 3. Data Files (Crucial to ignore for size & privacy)
+# ==========================================
+# Ignore all Excel, RDS, RData, and CSV files in data directories
+data_raw/
+data_interim/
+data_final/
+
+# Broad data extension ignore (failsafe)
+*.rds
+*.RData
+*.xlsx
+*.csv
+
+# ==========================================
+# 4. Generated Outputs (Figures, Tables, and Reports)
+# ==========================================
+outputs/
+docs/
+
+# Ignore rendered output files in scripts or elsewhere
+*.html
+*.docx
+*.pdf
+*.svg
+*.png
+
+# ==========================================
+# 5. Archive & Temporary Files
+# ==========================================
+# Ignore the archive folder entirely
+scripts/archive/
+
+# Keep git clean of any generated asset folders from Rmd/Quarto runs
+*_files/
+*_cache/
+
+# ==========================================
+# 6. Explicit Keeps (Whitelist)
+# ==========================================
+# We explicitly want to track these files
+!.gitignore
+!R.Rproj
+!scripts/
+!scripts/**/*.R
+!scripts/**/*.Rmd

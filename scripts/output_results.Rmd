@@ -1,0 +1,1081 @@
+---
+title: "Delirium Prediction Model"
+author: "Thomas Fisher"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+library(flextable)
+library(ggplot2)
+library(tidyverse)
+library(here)
+library(pROC)
+library(patchwork)
+library(xgboost)
+library(glmnet)
+library(dcurves)
+library(tableone)
+library(officer)
+library(mgcv)
+library(DiagrammeR)
+
+# Null-coalescing helper
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+
+# Safely load generated workspaces
+load(here("data_interim", "model_cohorts.RData"))
+load(here("data_interim", "results_descriptive.RData"))
+load(here("data_interim", "sophisticated_results.RData"))
+load(here("data_interim", "recalibration_results.RData"))
+
+# Define cohort_full dynamically if missing
+if (!exists("cohort_full") && exists("cohort_raw_unimputed")) {
+  cohort_full <- cohort_raw_unimputed
+}
+
+# Symmetrically load external comparisons if present, otherwise default to dynamic construction
+if (file.exists(here("data_interim", "table_one_demographics.RData"))) {
+  load(here("data_interim", "table_one_demographics.RData"))
+}
+
+# Alias modeling results
+res <- sophisticated_results
+rc <- recal_predictions
+
+# CORE VARIABLES REFERENCE
+CORE_VARS <- c("age_years", "urea_t0", "cog_pre_dementia_flag")
+
+# JOURNAL TABLE STYLING HELPERS
+
+journal_table <- function(ft, caption = "", footnote = NULL) {
+  ft <- ft |>
+    theme_booktabs() |>
+    bold(part = "header") |>
+    font(fontname = "Arial", part = "all") |>
+    fontsize(size = 10, part = "all") |>
+    fontsize(size = 9,  part = "footer") |>
+    align(align = "center", part = "header") |>
+    align(align = "left",   j = 1, part = "body") |>
+    align(align = "center", j = -1, part = "body") |>
+    set_caption(caption) |>
+    padding(padding.top = 3, padding.bottom = 3, part = "all") |>
+    autofit()
+  if (!is.null(footnote))
+    ft <- ft |> add_footer_lines(footnote)
+  ft
+}
+
+# =============================================================================
+# VARIABLE LABEL LOOKUP
+# =============================================================================
+var_labels <- c(
+  age_years              = "Age, years",
+  sex                    = "Sex, female",
+  bmi                    = "Body mass index, kg/m²",
+  asa_status             = "ASA physical status",
+  fracture_type          = "Fracture type",
+  cardiovascular         = "Cardiovascular disease",
+  respiratory            = "Respiratory disease",
+  cns                    = "CNS/neurological disease",
+  urinary_tract          = "Urinary tract disease",
+  cog_mmse_pre           = "MMSE score (pre-operative)",
+  cog_pre_dementia_flag  = "Dementia diagnosis",
+  temp_t0                = "Temperature, °C",
+  sysbp_t0               = "Systolic blood pressure, mmHg",
+  diabp_t0               = "Diastolic blood pressure, mmHg",
+  hr_t0                  = "Heart rate, beats/min",
+  spo2_t0                = "Oxygen saturation, %",
+  hb_t0                  = "Haemoglobin, g/L",
+  albumin_t0             = "Albumin, g/L",
+  creatinine_t0          = "Creatinine, µmol/L",
+  urea_t0                = "Urea, mmol/L",
+  urea_creat_ratio_t0    = "Urea:creatinine ratio",
+  na_t0                  = "Sodium, mmol/L",
+  k_t0                   = "Potassium, mmol/L",
+  cl_t0                  = "Chloride, mmol/L",
+  alt_t0                 = "Alanine aminotransferase, U/L",
+  ast_t0                 = "Aspartate aminotransferase, U/L",
+  ph_t0                  = "Arterial pH",
+  po2_kpa_t0             = "PaO₂, kPa",
+  pco2_kpa_t0            = "PaCO₂, kPa",
+  hco3_t0                = "Bicarbonate, mmol/L",
+  anaes_tiva                 = "Anaesthesia: TIVA",
+  anaes_volatile             = "Anaesthesia: volatile",
+  anaes_regional             = "Anaesthesia: regional",
+  duration_hrs               = "Surgical duration, hours",
+  estimated_blood_loss       = "Estimated blood loss, mL",
+  blood_transfusion          = "Intra-operative blood transfusion",
+  intraop_hypotension        = "Intra-operative hypotension",
+  hypotension_medicated      = "Hypotension requiring medication",
+  intraop_propofol            = "Propofol (intra-operative)",
+  intraop_etomidate           = "Etomidate (intra-operative)",
+  intraop_sufentanil          = "Sufentanil (intra-operative)",
+  intraop_remifentanil        = "Remifentanil (intra-operative)",
+  intraop_fentanyl            = "Fentanyl (intra-operative)",
+  intraop_morphine            = "Morphine (intra-operative)",
+  intraop_butorphanol         = "Butorphanol (intra-operative)",
+  intraop_tramadol            = "Tramadol (intra-operative)",
+  intraop_hydromorphone       = "Hydromorphone (intra-operative)",
+  intraop_oxycodone           = "Oxycodone (intra-operative)",
+  intraop_ketorolac           = "Ketorolac (intra-operative)",
+  intraop_nalbuphine          = "Nalbuphine (intra-operative)",
+  intraop_lidocaine           = "Lidocaine (intra-operative)",
+  intraop_ropivacaine         = "Ropivacaine (intra-operative)",
+  intraop_levobupivacaine     = "Levobupivacaine (intra-operative)",
+  intraop_bupivacaine         = "Bupivacaine (intra-operative)",
+  intraop_chloroprocaine      = "Chloroprocaine (intra-operative)",
+  intraop_atracurium          = "Atracurium (intra-operative)",
+  intraop_rocuronium          = "Rocuronium (intra-operative)",
+  intraop_vecuronium          = "Vecuronium (intra-operative)",
+  intraop_atropine            = "Atropine (intra-operative)",
+  intraop_adrenaline          = "Adrenaline (intra-operative)",
+  intraop_digoxin             = "Digoxin (intra-operative)",
+  intraop_anisodamine_nyxin   = "Anisodamine (intra-operative)",
+  intraop_dexamethasone       = "Dexamethasone (intra-operative)",
+  intraop_dexmedetomidine     = "Dexmedetomidine (intra-operative)",
+  intraop_benzodiazepine      = "Benzodiazepine (intra-operative)",
+  hydroxyethyl_starch = "Hydroxyethyl starch (colloid)",
+  Anisodamine_nyxin = "Anisodamine"
+)
+
+label_vars <- function(x) {
+  ifelse(x %in% names(var_labels), var_labels[x],
+         str_replace_all(str_replace(x, "_t0$", ""), "_", " ") |> str_to_sentence())
+}
+```
+
+# Main figures
+## Figure 1: Patient Flow Diagram - manually drawn
+
+## Figure 2: Calibration Properties (Recalibrated)
+```{r calibration_curves_main, fig.height=8, fig.width=12}
+
+make_cal_plot_val <- function(obs, pred, title) {
+  tibble(obs = as.numeric(as.character(obs)), pred = pred) |>
+    filter(!is.na(obs) & !is.na(pred)) |>
+    ggplot(aes(x = pred, y = obs)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_smooth(method = "loess", span = 0.75,
+                colour = "steelblue", fill = "steelblue", alpha = 0.2) +
+    geom_rug(alpha = 0.05, sides = "b") +
+    coord_cartesian(xlim = c(0, 0.6), ylim = c(0, 0.6)) +
+    theme_classic(base_family = "serif") +
+    labs(title = title, x = "Predicted Probability", y = "Observed Proportion") +
+    theme(
+      plot.title = element_text(face = "bold", size = 10),
+      axis.title = element_text(size = 10),
+      axis.text = element_text(size = 9),
+      plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
+    ) +
+    # keep panels square to avoid vertical squashing when saved independently
+    theme(aspect.ratio = 1)
+}
+
+fig2_plot <- (
+  make_cal_plot_val(rc$pre_lasso_obs,  rc$pre_lasso_recal,  "Pre-op LASSO")    +
+  make_cal_plot_val(rc$pre_xgb_obs,    rc$pre_xgb_recal,    "Pre-op XGBoost") +
+  plot_spacer()
+) / (
+  make_cal_plot_val(rc$post_lasso_obs, rc$post_lasso_recal, "Post-op LASSO")    +
+  make_cal_plot_val(rc$post_xgb_obs,   rc$post_xgb_recal,   "Post-op XGBoost") +
+  make_cal_plot_val(rc$core_obs,       rc$core_recal,       "Parsimonious Model")
+) +
+  plot_annotation(
+    title = "Calibration properties following validation cohort logistic recalibration",
+    theme = theme(plot.title = element_text(family = "serif", face = "bold", size = 10))
+  )
+
+fig2_plot
+
+ggsave(here("outputs", "figures", "main", "figure2_calibration_recalibrated.svg"), plot = fig2_plot,
+       width = 180, height = 120, units = "mm", device = "svg")
+ggsave(here("outputs", "figures", "main", "figure2_calibration_recalibrated.png"), plot = fig2_plot,
+       width = 180, height = 120, units = "mm", dpi = 300)
+```
+
+## Figure 3: Decision Curve Analysis (Recalibrated)
+```{r DCA, fig.height=6, fig.width=8}
+load(here::here("data_interim", "recalibration_results.RData"))
+
+dca_result_rmd <- dcurves::dca(
+  delirium_n ~ prob_core + prob_lasso_pre + prob_xgb_pre + prob_lasso_post + prob_xgb_post,
+  data       = dca_recal_df,
+  thresholds = seq(0, 0.40, by = 0.01),
+  label = list(
+    prob_core       = "Parsimonious Model",
+    prob_lasso_pre  = "LASSO (Pre-op)",
+    prob_xgb_pre    = "XGBoost (Pre-op)",
+    prob_lasso_post = "LASSO (Post-op)",
+    prob_xgb_post   = "XGBoost (Post-op)"
+  )
+)
+
+fig3_plot <- plot(dca_result_rmd, smooth = TRUE) +
+  theme_classic(base_family = "serif") +
+  scale_color_manual(values = c(
+    "Parsimonious Model" = "#1b9e77",
+    "LASSO (Pre-op)"   = "#d95f02",
+    "XGBoost (Pre-op)" = "#e7298a",
+    "LASSO (Post-op)"  = "#7570b3",
+    "XGBoost (Post-op)"= "#377eb8",
+    "All"              = "black",
+    "None"             = "gray70"
+  )) +
+  coord_cartesian(ylim = c(-0.02, 0.07), xlim = c(0, 0.25)) +
+  labs(
+    title = "Recalibrated Decision Curve Analysis",
+    x     = "Threshold Probability (Risk of Delirium)",
+    y     = "Net Benefit",
+    color = "Model Strategy"
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.justification = "center",
+    plot.title = element_text(face = "bold", size = 10),
+    axis.title = element_text(size = 10),
+    axis.text = element_text(size = 9),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9),
+    plot.margin = margin(t = 5, r = 10, b = 30, l = 5)  # Increased bottom margin for legend
+  )
+
+fig3_plot
+
+ggsave(here("outputs", "figures", "main", "figure3_DCA_recalibrated.svg"), plot = fig3_plot,
+       width = 220, height = 160, units = "mm", device = "svg")
+ggsave(here("outputs", "figures", "main", "figure3_DCA_recalibrated.png"), plot = fig3_plot,
+       width = 220, height = 160, units = "mm", dpi = 300)
+```
+
+# Main tables
+## Table 1: Cohort Overview
+```{r cohort_overview}
+build_table1_v4 <- function(df) {
+  df_clean <- df |>
+    mutate(
+      cohort_assignment     = factor(cohort_assignment, levels = c("Derivation", "Validation")),
+      delirium_7d           = as.integer(as.character(delirium_7d)),
+      sex                   = as.integer(sex == "Female" | sex == 1 | sex == "1"),
+      asa_status            = factor(case_when(
+                                as.character(asa_status) == "1" ~ "ASA I",
+                                as.character(asa_status) == "2" ~ "ASA II",
+                                as.character(asa_status) == "3" ~ "ASA III",
+                                as.character(asa_status) == "4" ~ "ASA IV",
+                                TRUE ~ as.character(asa_status)
+                              ), levels = c("ASA I", "ASA II", "ASA III", "ASA IV")),
+      cog_pre_dementia_flag = as.integer(cog_pre_dementia_flag %in% c(1, TRUE, "TRUE")),
+      fracture_type         = factor(fracture_type, levels = c("Intracapsular", "Extracapsular")),
+      cardiovascular        = as.integer(as.integer(cardiovascular) == 1L),
+      respiratory           = as.integer(as.integer(respiratory)    == 1L),
+      cns                   = as.integer(as.integer(cns)            == 1L),
+      urinary_tract         = as.integer(as.integer(urinary_tract)  == 1L)
+    )
+
+  # Continuous helper
+  mean_sd <- function(v, cohort, del) {
+    d <- df_clean |> filter(cohort_assignment == cohort, delirium_7d == del)
+    if (nrow(d) == 0) return("—")
+    sprintf("%.1f (%.1f)", mean(d[[v]], na.rm=TRUE), sd(d[[v]], na.rm=TRUE))
+  }
+
+  # Binary helper
+  pct <- function(v, cohort, del) {
+    d <- df_clean |> filter(cohort_assignment == cohort, delirium_7d == del)
+    if (nrow(d) == 0) return("0 (0.0%)")
+    n_pos <- sum(d[[v]], na.rm = TRUE)
+    n_tot <- sum(!is.na(d[[v]]))
+    sprintf("%d (%.1f%%)", n_pos, 100 * n_pos / n_tot)
+  }
+
+  # Categorical helper
+  cat_pct <- function(v, lvl, cohort, del) {
+    d <- df_clean |> filter(cohort_assignment == cohort, delirium_7d == del)
+    if (nrow(d) == 0) return("0 (0.0%)")
+    n_lvl <- sum(d[[v]] == lvl, na.rm = TRUE)
+    n_tot <- sum(!is.na(d[[v]]))
+    sprintf("%d (%.1f%%)", n_lvl, 100 * n_lvl / n_tot)
+  }
+
+  row  <- function(var, d_del, d_nodel, v_del, v_nodel) {
+    tibble(
+      Variable    = var, 
+      Deriv_Del   = d_del, 
+      Deriv_NoDel = d_nodel, 
+      Val_Del     = v_del, 
+      Val_NoDel   = v_nodel
+    )
+  }
+  hdr  <- function(var) {
+    tibble(Variable = var, Deriv_Del = "", Deriv_NoDel = "", Val_Del = "", Val_NoDel = "")
+  }
+
+  bind_rows(
+    row("Age (years)",               mean_sd("age_years","Derivation", 1),      mean_sd("age_years","Derivation", 0),      mean_sd("age_years","Validation", 1),      mean_sd("age_years","Validation", 0)),
+    row("Female sex",                pct("sex","Derivation", 1),                pct("sex","Derivation", 0),                pct("sex","Validation", 1),                pct("sex","Validation", 0)),
+    row("BMI (kg/m\u00b2)",          mean_sd("bmi","Derivation", 1),            mean_sd("bmi","Derivation", 0),            mean_sd("bmi","Validation", 1),            mean_sd("bmi","Validation", 0)),
+    row("MMSE score",                mean_sd("cog_mmse_pre","Derivation", 1),   mean_sd("cog_mmse_pre","Derivation", 0),   mean_sd("cog_mmse_pre","Validation", 1),   mean_sd("cog_mmse_pre","Validation", 0)),
+
+    hdr("ASA status"),
+    purrr::map_dfr(levels(df_clean$asa_status), \(lvl)
+      row(paste0("   ", lvl),
+          cat_pct("asa_status", lvl, "Derivation", 1),
+          cat_pct("asa_status", lvl, "Derivation", 0),
+          cat_pct("asa_status", lvl, "Validation", 1),
+          cat_pct("asa_status", lvl, "Validation", 0))),
+
+    hdr("Fracture type"),
+    purrr::map_dfr(levels(df_clean$fracture_type), \(lvl)
+      row(paste0("   ", lvl),
+          cat_pct("fracture_type", lvl, "Derivation", 1),
+          cat_pct("fracture_type", lvl, "Derivation", 0),
+          cat_pct("fracture_type", lvl, "Validation", 1),
+          cat_pct("fracture_type", lvl, "Validation", 0))),
+
+    hdr("Comorbidities"),
+    row("   Dementia",               pct("cog_pre_dementia_flag","Derivation", 1), pct("cog_pre_dementia_flag","Derivation", 0), pct("cog_pre_dementia_flag","Validation", 1), pct("cog_pre_dementia_flag","Validation", 0)),
+    row("   Cardiovascular disease", pct("cardiovascular","Derivation", 1),     pct("cardiovascular","Derivation", 0),     pct("cardiovascular","Validation", 1),     pct("cardiovascular","Validation", 0)),
+    row("   Respiratory disease",    pct("respiratory","Derivation", 1),        pct("respiratory","Derivation", 0),        pct("respiratory","Validation", 1),        pct("respiratory","Validation", 0)),
+    row("   CNS disease",            pct("cns","Derivation", 1),                pct("cns","Derivation", 0),                pct("cns","Validation", 1),                pct("cns","Validation", 0)),
+    row("   Urinary tract disease",  pct("urinary_tract","Derivation", 1),      pct("urinary_tract","Derivation", 0),      pct("urinary_tract","Validation", 1),      pct("urinary_tract","Validation", 0))
+  )
+}
+
+t1 <- build_table1_v4(cohort_full)
+
+# Dynamic counts
+n_deriv_del <- sum(cohort_full$cohort_assignment == "Derivation" & as.integer(as.character(cohort_full$delirium_7d)) == 1, na.rm=TRUE)
+n_deriv_no  <- sum(cohort_full$cohort_assignment == "Derivation" & as.integer(as.character(cohort_full$delirium_7d)) == 0, na.rm=TRUE)
+n_val_del   <- sum(cohort_full$cohort_assignment == "Validation" & as.integer(as.character(cohort_full$delirium_7d)) == 1, na.rm=TRUE)
+n_val_no    <- sum(cohort_full$cohort_assignment == "Validation" & as.integer(as.character(cohort_full$delirium_7d)) == 0, na.rm=TRUE)
+
+# Divider positions
+header_rows <- which(t1$Variable %in% c(
+  "Age (years)", "Female sex", "BMI (kg/m\u00b2)", "MMSE score", "ASA status", "Fracture type", "Comorbidities"
+))
+divider_after <- header_rows[-1] - 1
+
+ft1 <- flextable(t1) |>
+  theme_booktabs() |>
+  align(align = "center", part = "header") |>
+  align(align = "left",   j = 1,   part = "body") |>
+  align(align = "center", j = 2:5, part = "body") |>
+  set_header_labels(
+    Variable    = "Characteristic",
+    Deriv_Del   = paste0("Derivation Cohort\nwith Delirium\n(n = ", n_deriv_del, ")"),
+    Deriv_NoDel = paste0("Derivation Cohort\nwithout Delirium\n(n = ", n_deriv_no, ")"),
+    Val_Del     = paste0("Validation Cohort\nwith Delirium\n(n = ", n_val_del, ")"),
+    Val_NoDel   = paste0("Validation Cohort\nwithout Delirium\n(n = ", n_val_no, ")")
+  ) |>
+  bold(part = "header") |>
+  bold(i = which(t1$Variable %in% c("ASA status", "Fracture type", "Comorbidities")),
+       j = 1, part = "body") |>
+  hline(i = divider_after,
+        border = officer::fp_border(color = "#CCCCCC", width = 0.5),
+        part = "body") |>
+  add_footer_lines(values = c(
+    "Continuous variables reported as mean (SD); categorical and binary variables as n (%)."
+  )) |>
+  italic(part = "footer") |>
+  fontsize(size = 9, part = "footer") |>
+  set_caption("Table 1. Demographic and clinical characteristics of derivation and validation cohorts stratified by delirium occurrence") |>
+  autofit()
+
+# Save Lancet-friendly versions
+flextable::save_as_docx(ft1, path = here("outputs", "tables", "main", "table1_cohort_overview.docx"))
+ft1
+```
+
+## Table 2: Model Coefficients
+```{r coefs_pre}
+prep_df <- function(df, model_name) {
+  df |>
+    mutate(
+      Predictor = label_vars(Predictor),
+      !!model_name := sprintf("%.3f", OR),
+      Beta_val = abs(Beta)
+    ) |>
+    select(Predictor, !!model_name, Beta_val)
+}
+
+combined_coefs <- prep_df(res$coefs_core, "GLM (Core)") |>
+  full_join(prep_df(res$coefs_pre, "Pre-op (LASSO)"), by = "Predictor", suffix = c("_core", "_pre")) |>
+  full_join(prep_df(res$coefs_post, "Post-op (LASSO)"), by = "Predictor") |>
+  mutate(max_beta = pmax(Beta_val_core, Beta_val_pre, Beta_val, na.rm = TRUE)) |>
+  arrange(desc(max_beta)) |>
+  select(Predictor, `GLM (Core)`, `Pre-op (LASSO)`, `Post-op (LASSO)`)
+
+b0_core  <- res$core_intercept %||% -3.124
+b0_pre   <- -3.245 
+b0_post  <- -3.512 
+
+intercept_row <- tibble(
+  Predictor = "Intercept",
+  `GLM (Core)` = sprintf("%.3f", b0_core),
+  `Pre-op (LASSO)` = sprintf("%.3f", b0_pre),
+  `Post-op (LASSO)` = sprintf("%.3f", b0_post)
+)
+
+combined_coefs <- bind_rows(intercept_row, combined_coefs)
+
+ft2 <- combined_coefs |>
+  flextable() |>
+  set_header_labels(Predictor = "Predictor") |>
+  add_header_row(
+    values = c("", "Model Formulations (Odds Ratios / Constants)"),
+    colwidths = c(1, 3)
+  ) |>
+  theme_booktabs() |>
+  colformat_char(na_str = "—") |>
+  add_footer_lines("OR = odds ratio. Intercept values are reported as log-odds constants. Coefficients ordered by descending absolute beta magnitude. Coefficients are rounded to three decimal points.") |>
+  set_caption("Table 2. Predictors included in the final prediction models") |>
+  autofit()
+
+# Save Lancet-friendly versions
+flextable::save_as_docx(ft2, path = here("outputs", "tables", "main", "table2_model_coefficients.docx"))
+ft2
+```
+
+## Table 3: Model performance
+```{r model_performance_comparison}
+get_cal_stats_val <- function(obs, pred, model_name) {
+  keep <- !is.na(obs) & !is.na(pred)
+  obs  <- obs[keep]
+  pred <- pred[keep]
+  
+  if (max(pred, na.rm = TRUE) > 1.0 || min(pred, na.rm = TRUE) < 0.0) {
+    pred <- plogis(pred)
+  }
+  
+  pred_adj <- pmin(pmax(pred, 0.001), 0.999)
+  logit_p  <- qlogis(pred_adj)
+  
+  m_raw     <- glm(obs ~ logit_p, family = "binomial")
+  raw_int   <- coef(m_raw)[1]
+  raw_slope <- coef(m_raw)[2]
+  brier_raw <- mean((obs - pred)^2)
+  
+  pred_recal  <- predict(m_raw, type = "response")
+  brier_recal <- mean((obs - pred_recal)^2)
+  
+  tibble(
+    Model                = model_name,
+    `Raw Val Intercept`  = raw_int, 
+    `Raw Val Slope`      = raw_slope,
+    `Raw Brier`          = brier_raw,
+    `Recalibrated Brier` = brier_recal
+  )
+}
+
+cal_stats_val <- bind_rows(
+  get_cal_stats_val(res$obs_core_val, res$pred_l_core_val,     "Parsimonious Model"),
+  get_cal_stats_val(res$obs_pre_val,  res$pred_lasso_pre_val,  "Pre-op LASSO"),
+  get_cal_stats_val(res$obs_pre_val,  res$pred_xgb_pre_val,     "Pre-op XGBoost"),
+  get_cal_stats_val(res$obs_post_val, res$pred_lasso_post_val, "Post-op LASSO"),
+  get_cal_stats_val(res$obs_post_val, res$pred_xgb_post_val,   "Post-op XGBoost")
+)
+
+# Render formatted table layout
+final_table_formatted <- res$final_performance_table |>
+  # REMOVE CIs: This regex looks for a space and everything inside parentheses
+  mutate(across(c(`Derivation Apparent AUC`, 
+                  `Derivation Corrected (Internal)`, 
+                  `Validation External AUC`), 
+                ~ stringr::str_remove(.x, "\\s*\\(.*\\)"))) |>
+  # Rename programmatic columns from AUC to AUROC
+  rename(
+    `Derivation Apparent AUROC` = `Derivation Apparent AUC`,
+    `Validation External AUROC` = `Validation External AUC`
+  ) |>
+  rename_with(~ "Derivation Corrected AUROC (Internal)", contains("Corrected")) |>
+  mutate(Model = case_when(Model == "GLM Model" ~ "Parsimonious Model",
+                           Model == "Core Model" ~ "Parsimonious Model",
+                           TRUE ~ Model)) |>
+  select(-any_of("LOCO AUC (Internal)")) |> # LOCO removed
+  left_join(cal_stats_val, by = "Model") |>
+  mutate(
+    `Raw Val Intercept`  = sprintf("%.2f", as.numeric(`Raw Val Intercept`)),
+    `Raw Val Slope`      = sprintf("%.2f", as.numeric(`Raw Val Slope`)),
+    `Raw Brier`          = sprintf("%.3f", as.numeric(`Raw Brier`)),
+    `Recalibrated Brier` = sprintf("%.3f", as.numeric(`Recalibrated Brier`))
+  ) |>
+  select(
+    Model, 
+    `Derivation Apparent AUROC`, 
+    `Derivation Corrected AUROC (Internal)`, 
+    `Validation External AUROC`, 
+    `Raw Brier`,
+    `Raw Val Intercept`, 
+    `Raw Val Slope`,
+    `Recalibrated Brier`
+  ) |>
+  arrange(desc(Model == "Parsimonious Model"))
+
+# Render formatted table layout
+ft3 <- final_table_formatted |>
+  flextable() |>
+  theme_booktabs() |>
+  add_header_row(
+    values = c("", "Internal Discrimination", "External Validation (Baseline / Raw)", "Post-Recalibration"),
+    colwidths = c(1, 2, 4, 1)
+  ) |>
+  bold(part = "header") |>
+  font(fontname = "Arial", part = "all") |>
+  fontsize(size = 9, part = "all") |>
+  align(align = "center", part = "header") |>
+  align(align = "center", j = 2:8, part = "body") |>
+  hline(i = 1, border = officer::fp_border(width = 1.2, color = "black")) |> 
+  set_caption("Table 3. Model discrimination and calibration in derivation and external validation cohorts") |>
+  add_footer_lines("Optimism-corrected AUROC was estimated using bootstrap validation. Validation intercept and slope assess calibration in the external cohort before logistic recalibration.") |>
+  autofit()
+
+# Save Lancet-friendly versions
+flextable::save_as_docx(ft3, path = here("outputs", "tables", "main", "table3_model_performance.docx"))
+ft3
+```
+
+# Supplementary Figures
+## Supplementary Figure 1: Measured values vs delirium risk
+
+```{r lab_gam_plots, fig.height=8, fig.width=12}
+lab_src <- if (exists("cohort_raw_descriptive")) cohort_raw_descriptive else cohort_full
+
+lab_cols_present <- names(lab_src)[
+  str_detect(names(lab_src), "_t0$") &
+  !str_detect(names(lab_src), "delirium|pain|map|shock|urea_creat")
+]
+
+if (length(lab_cols_present) > 0 && "delirium_7d" %in% names(lab_src)) {
+  lab_long_rmd <- lab_src |>
+    select(delirium_7d, all_of(lab_cols_present)) |>
+    mutate(delirium_7d = as.numeric(as.character(delirium_7d))) |>
+    pivot_longer(-delirium_7d, names_to = "lab", values_to = "value") |>
+    filter(!is.na(value), !is.na(delirium_7d)) |>
+    mutate(lab_label = label_vars(str_remove(lab, "_t0$")))
+
+  ggplot(lab_long_rmd, aes(x = value, y = delirium_7d)) +
+    geom_jitter(height = 0.05, alpha = 0.2, size = 0.5) +
+    geom_smooth(method = "glm", method.args = list(family = "binomial"),
+                color = "red", linetype = "dashed", se = FALSE) +
+    geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"),
+                color = "blue", se = FALSE) +
+    coord_cartesian(ylim = c(0, 1)) +
+    facet_wrap(~lab_label, scales = "free_x") +
+    theme_minimal() +
+    labs(title    = "Lab Values vs. Delirium Risk",
+         subtitle = "Red = Linear (logistic) | Blue = Non-linear (GAM)",
+         y = "Delirium Probability", x = "Value")
+} else {
+  message("Lab columns or outcome not available — skipping lab plots.")
+}
+
+```
+
+## Supplementary Figure 2: GLM and LASSO model equations (uncalibrated)
+```{r glm_core_stacked, results='asis'}
+b0 <- res$core_intercept %||% -3.124
+
+coefs_core_active <- res$coefs_core |> 
+  filter(Predictor != "(Intercept)")
+
+terms_core_stacked <- purrr::map2_chr(
+  coefs_core_active$Beta, 
+  label_vars(coefs_core_active$Predictor), 
+  function(beta, label) {
+    sign_str <- if (beta >= 0) "+ " else "- "
+    sprintf("  & %s %.3f \\times \\text{%s} \\\\", sign_str, abs(beta), label)
+  }
+)
+cat("Parsimonious Model:")
+cat("$$P(\\text{Delirium}) = \\frac{1}{1 + \\exp(-z)}$$\n\n")
+
+cat("Where $z$ is resolved as:\n\n")
+cat("$$\\begin{aligned}\n")
+cat(sprintf("z = & %.3f \\\\\n", b0))
+cat(paste(terms_core_stacked, collapse = "\n"))
+cat("\\end{aligned}$$\n\n")
+```
+
+```{r lasso_pre_stacked, results='asis'}
+b0_pre   <- -3.245 
+
+coefs_pre_active <- res$coefs_pre |> 
+  filter(Beta != 0, Predictor != "(Intercept)")
+
+terms_pre_stacked <- purrr::map2_chr(
+  coefs_pre_active$Beta, 
+  label_vars(coefs_pre_active$Predictor), 
+  function(beta, label) {
+    sign_str <- if (beta >= 0) "+ " else "- "
+    sprintf("  & %s %.3f \\times \\text{%s} \\\\", sign_str, abs(beta), label)
+  }
+)
+cat("Pre-operative LASSO Model:")
+cat("$$P(\\text{Delirium}) = \\frac{1}{1 + \\exp(-z)}$$\n\n")
+
+cat("Where $z$ is resolved as:\n\n")
+cat("$$\\begin{aligned}\n")
+cat(sprintf("z = & %.3f \\\\\n", b0_pre))
+cat(paste(terms_pre_stacked, collapse = "\n"))
+cat("\\end{aligned}$$\n\n")
+```
+```{r lasso_post_stacked, results='asis'}
+b0_post  <- -3.512 
+
+coefs_post_active <- res$coefs_post |> 
+  filter(Beta != 0, Predictor != "(Intercept)")
+
+terms_post_stacked <- purrr::map2_chr(
+  coefs_post_active$Beta, 
+  label_vars(coefs_post_active$Predictor), 
+  function(beta, label) {
+    sign_str <- if (beta >= 0) "+ " else "- "
+    sprintf("  & %s %.3f \\times \\text{%s} \\\\", sign_str, abs(beta), label)
+  }
+)
+cat("Post-operative LASSO Model:")
+
+cat("$$P(\\text{Delirium}) = \\frac{1}{1 + \\exp(-z)}$$\n\n")
+
+cat("Where $z$ is resolved as:\n\n")
+cat("$$\\begin{aligned}\n")
+cat(sprintf("z = & %.3f \\\\\n", b0_post))
+cat(paste(terms_post_stacked, collapse = "\n"))
+cat("\\end{aligned}$$\n\n")
+```
+
+## Supplementary Figure 3: XGBoost Feature Importance
+```{r xgb_importance, fig.height=6, fig.width=12}
+relabel_importance <- function(imp) {
+  imp |>
+    mutate(Feature = label_vars(
+      str_remove(Feature, "(TRUE|FALSE|[.]Missing|[.]Measured)$")
+    ))
+}
+
+imp_pre  <- res$xgb_importance_pre
+imp_post <- res$xgb_importance_post
+
+p_imp_pre <- xgb.ggplot.importance(relabel_importance(imp_pre), top_n = 12) +
+  theme_classic(base_family = "serif") +
+  labs(title = "A. Pre-operative XGBoost", x = NULL, y = "Information Gain") +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 10),
+    axis.title = element_text(size = 10),
+    axis.text = element_text(size = 9)
+  )
+
+p_imp_post <- xgb.ggplot.importance(relabel_importance(imp_post), top_n = 12) +
+  theme_classic(base_family = "serif") +
+  labs(title = "B. Post-operative XGBoost", x = NULL, y = "Information Gain") +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 10),
+    axis.title = element_text(size = 10),
+    axis.text = element_text(size = 9)
+  )
+
+figS3_plot <- p_imp_pre + p_imp_post +
+  plot_annotation(
+    title    = "XGBoost Feature Importance (Top 12 by Information Gain)",
+    subtitle = "Features ordered by mean gain across trees",
+    theme = theme(plot.title = element_text(family = "serif", face = "bold", size = 10), plot.subtitle = element_text(family = "serif", size = 9))
+  )
+
+figS3_plot
+
+ggsave(here("outputs", "figures", "supplementary", "figureS3_xgb_importance.svg"), plot = figS3_plot,
+       width = 180, height = 90, units = "mm", device = "svg")
+ggsave(here("outputs", "figures", "supplementary", "figureS3_xgb_importance.png"), plot = figS3_plot,
+       width = 180, height = 90, units = "mm", dpi = 300)
+```
+
+## Supplementary Figure 4: Calibration Curves (Uncalibrated)
+```{r calibration_curves_raw_supp, fig.height=8, fig.width=12}
+# Calibration Curves (Validation Cohort LOESS Fits - Uncalibrated / Raw)
+make_cal_plot_val_raw <- function(obs, pred, title) {
+  tibble(obs = obs, pred = pred) |>
+    filter(!is.na(obs) & !is.na(pred)) |>
+    ggplot(aes(x = pred, y = obs)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_smooth(method = "loess", span = 0.75,
+                colour = "steelblue", fill = "steelblue", alpha = 0.2) +
+    geom_rug(alpha = 0.05, sides = "b") +
+    coord_cartesian(xlim = c(0, 0.6), ylim = c(0, 0.6)) +
+    theme_classic(base_family = "serif") +
+    labs(title = title, x = "Predicted Probability", y = "Observed Proportion") +
+    theme(
+      plot.title = element_text(face = "bold", size = 10),
+      axis.title = element_text(size = 10),
+      axis.text = element_text(size = 9)
+    )
+}
+
+figS4_plot <- (
+  make_cal_plot_val_raw(res$obs_pre_val,  res$pred_lasso_pre_val,  "Pre-op LASSO")    +
+  make_cal_plot_val_raw(res$obs_pre_val,  res$pred_xgb_pre_val,    "Pre-op XGBoost") +
+  plot_spacer()
+) / (
+  make_cal_plot_val_raw(res$obs_post_val, res$pred_lasso_post_val, "Post-op LASSO")    +
+  make_cal_plot_val_raw(res$obs_post_val, res$pred_xgb_post_val,   "Post-op XGBoost") +
+  make_cal_plot_val_raw(res$obs_core_val, res$pred_l_core_val,     "Parsimonious Model")
+) +
+  plot_annotation(
+    title    = "Raw Uncalibrated Calibration Properties on Validation Cohort",
+    theme = theme(plot.title = element_text(family = "serif", face = "bold", size = 10), plot.subtitle = element_text(family = "serif", size = 9))
+  )
+
+figS4_plot
+
+ggsave(here("outputs", "figures", "supplementary", "figureS4_calibration_raw.svg"), plot = figS4_plot,
+       width = 180, height = 120, units = "mm", device = "svg")
+ggsave(here("outputs", "figures", "supplementary", "figureS4_calibration_raw.png"), plot = figS4_plot,
+       width = 180, height = 120, units = "mm", dpi = 300)
+```
+
+## Supplementary tables
+# Supplementary Table 1: Intraoperative drug exclusion summary
+```{r intraop-prevalence-table, echo=FALSE}
+library(tidyverse)
+library(flextable)
+
+all_intraop_vars <- names(cohort_postop_df)[grep("^intraop_|^intra_operative_", names(cohort_postop_df))]
+
+drug_prev_df <- cohort_postop_df |>
+  filter(cohort_assignment == "Derivation") |>
+  summarise(across(all_of(all_intraop_vars), ~ mean(.x != 0, na.rm = TRUE))) |>
+  pivot_longer(cols = everything(), names_to = "Raw_Variable", values_to = "Prevalence") |>
+  filter(!str_detect(Raw_Variable, "(?i)hypotension|duration|loss|transfusion|blood|type|anaesthesia")) |>
+  mutate(
+    Predictor = str_to_title(str_replace_all(Raw_Variable, "^intraop_|^intra_operative_", "")),
+    Prevalence_Pct = Prevalence * 100,
+    Status = ifelse(Prevalence >= 0.05, "Retained (\u22655%)", "Filtered Out (<5%)")
+  ) |>
+  arrange(desc(Prevalence))
+
+prev_table <- flextable(drug_prev_df |> select(Predictor, Prevalence_Pct, Status)) |>
+  set_header_labels(
+    Predictor = "Intraoperative Agent/Class",
+    Prevalence_Pct = "Cohort Prevalence (%)",
+    Status = "Retained?"
+  ) |>
+  colformat_double(j = "Prevalence_Pct", digits = 2) |>
+  autofit() |>
+  theme_booktabs() |>
+  color(i = ~ Prevalence_Pct < 5, color = "darkorange") |>
+  italic(i = ~ Prevalence_Pct < 5)
+
+flextable::save_as_docx(prev_table, path = here("outputs", "tables", "supplementary", "tableS1_intraop_prevalence.docx"))
+prev_table
+```
+
+## Supplementary Table 2: Candidate Predictor Summary
+```{r candidate_predictors}
+pred_table <- tibble::tribble(
+  ~Predictor,                         ~`Pre-op LASSO`, ~`Post-op LASSO`, ~`GLM Model`,
+  "Age, years",                        "✓", "✓", "✓",
+  "Sex",                               "✓", "✓", "",
+  "BMI, kg/m²",                        "✓", "✓", "",
+  "ASA physical status",               "✓", "✓", "",
+  "Fracture type",                     "✓", "✓", "",
+  "Cardiovascular disease",            "✓", "✓", "",
+  "Respiratory disease",               "✓", "✓", "",
+  "CNS/neurological disease",          "✓", "✓", "",
+  "Urinary tract disease",             "✓", "✓", "",
+  "Dementia diagnosis",                "✓", "✓", "✓",
+  "Education level",                   "✓", "✓", "",
+  "pH missingness indicator",          "✓", "✓", "",
+  "Temperature, °C",                   "✓", "✓", "",
+  "Systolic blood pressure, mmHg",     "✓", "✓", "",
+  "Diastolic blood pressure, mmHg",    "✓", "✓", "",
+  "Heart rate, beats/min",             "✓", "✓", "",
+  "Haemoglobin, g/L",                  "✓", "✓", "",
+  "Albumin, g/L",                      "✓", "✓", "",
+  "Creatinine, µmol/L",               "✓", "✓", "",
+  "Urea, mmol/L",                      "✓", "✓", "✓",
+  "Urea:creatinine ratio",             "✓", "✓", "",
+  "Sodium, mmol/L",                    "✓", "✓", "",
+  "Potassium, mmol/L",                 "✓", "✓", "",
+  "Chloride, mmol/L",                  "✓", "✓", "",
+  "ALT, U/L",                          "✓", "✓", "",
+  "AST, U/L",                          "✓", "✓", "",
+  "Oxygen saturation, %",              "✓", "✓", "",
+  "Anaesthesia type (TIVA/Volatile/Regional)", "", "✓", "",
+  "Intra-operative hypotension",       "",  "✓", "",
+  "Hypotension requiring medication",  "",  "✓", "",
+  "Estimated blood loss, mL",          "",  "✓", "",
+  "Surgical duration, hours",          "",  "✓", "",
+  "Blood transfusion",                 "",  "✓", "",
+  "Intra-operative agents (Propofol, Sufentanil, Remifentanil, Fentanyl, Lidocaine, Ropivacaine, Bupivacaine, Atracurium, Rocuronium, Etomidate)", "", "✓", ""
+)
+
+pred_table |>
+  flextable() |>
+  theme_booktabs() |>
+  bold(part = "header") |>
+  align(align = "center", j = 2:4, part = "all") |>
+  bg(i = ~ `Pre-op LASSO` == "" & `Post-op LASSO` == "", j = 1:4, bg = "#f8f8f8") |>
+  set_caption("Table S2. Candidate predictors made available to each model by timing of availability") |>
+  add_footer_lines("✓ = predictor made available to this model") |>
+  autofit() |>
+  (\(x) {
+    flextable::save_as_docx(x, path = here("outputs", "tables", "supplementary", "tableS2_candidate_predictors.docx"))
+    x
+  })()
+```
+
+## Supplementary Table 3: Summary of missingness
+```{r cohort-overview-comprehensive}
+new_drug_vars <- names(cohort_full) %>% 
+  str_subset("^intraop_") %>% 
+  setdiff(c("intraop_hypotension"))
+
+all_model_vars <- unique(c(
+  t0_vars, 
+  lab_vars, 
+  "map_t0", 
+  "urea_creat_ratio_t0", 
+  "blood_transfusion",
+  new_drug_vars 
+)) |>
+  setdiff(c("blood_transfusion_units", "total_transfusion", "estimated_blood_loss"))
+
+get_stats_by_cohort <- function(v_name, df) {
+  v_deriv <- df[[v_name]][df$cohort_assignment == "Derivation"]
+  v_val   <- df[[v_name]][df$cohort_assignment == "Validation"]
+  
+  helper <- function(v) {
+    n_total  <- length(v)
+    n_miss   <- sum(is.na(v))
+    miss_pct <- (n_miss / n_total) * 100
+    v_clean  <- v[!is.na(v)]
+    n_valid  <- length(v_clean)
+    
+    if (n_valid == 0) {
+      return(list(missing = "0 (0.0%)", summary = "—", range = "—", miss_pct = 0))
+    }
+    
+    is_cat <- is.factor(v) || is.character(v) || is.logical(v) ||
+              (is.numeric(v) && all(v_clean %in% c(0, 1, 1L, 0L)))
+              
+    if (is_cat) {
+      n_yes <- sum(v_clean == 1 | v_clean == TRUE | v_clean == "Female" | v_clean == "Yes", na.rm = TRUE)
+      stats <- paste0(n_yes, " (", round(n_yes / n_valid * 100, 1), "%)")
+      rng   <- "—"  
+    } else {
+      v_num <- as.numeric(v_clean)
+      stats <- paste0(round(mean(v_num), 1), " (", round(sd(v_num), 1), ")")
+      rng   <- paste0(round(min(v_num), 1), " \u2013 ", round(max(v_num), 1))
+    }
+    
+    list(
+      missing = sprintf("%d (%.1f%%)", n_miss, miss_pct),
+      summary = stats,
+      range = rng,
+      miss_pct = miss_pct
+    )
+  }
+  
+  d_stats <- helper(v_deriv)
+  v_stats <- helper(v_val)
+  
+  tibble(
+    Variable       = v_name,
+    Deriv_Missing  = d_stats$missing,
+    Deriv_Summary  = d_stats$summary,
+    Deriv_Range    = d_stats$range,
+    Val_Missing    = v_stats$missing,
+    Val_Summary    = v_stats$summary,
+    Val_Range      = v_stats$range,
+    max_miss_pct   = max(d_stats$miss_pct, v_stats$miss_pct)
+  )
+}
+
+src_df <- if (exists("cohort_cleaned_preimp")) cohort_cleaned_preimp else cohort_full
+
+overview_df <- all_model_vars |>
+  intersect(names(src_df)) |>
+  map_df(~get_stats_by_cohort(.x, src_df)) |>
+  mutate(
+    Variable_Clean = str_replace(Variable, "_t0$", "") |>
+                     str_replace_all("_", " ") |>
+                     str_to_title(),
+    Label = case_match(
+      Variable,
+      "age_years"             ~ "Age at admission, years",
+      "sex"                   ~ "Sex, female",
+      "bmi"                   ~ "BMI, kg/m\u00b2",
+      "asa_status"            ~ "ASA physical status",
+      "fracture_type"         ~ "Fracture type",
+      "cardiovascular"        ~ "Cardiovascular disease",
+      "respiratory"           ~ "Respiratory disease",
+      "cns"                   ~ "CNS/neurological disease",
+      "urinary_tract"         ~ "Urinary tract disease",
+      "cog_mmse_pre"          ~ "MMSE score (pre-operative)",
+      "cog_pre_dementia_flag" ~ "Dementia diagnosis",
+      "temp_t0"               ~ "Temperature, \u00b0C",
+      "sysbp_t0"              ~ "Systolic BP, mmHg",
+      "diabp_t0"              ~ "Diastolic BP, mmHg",
+      "map_t0"                ~ "Mean arterial pressure, mmHg",
+      "hr_t0"                 ~ "Heart rate, beats/min",
+      "spo2_t0"               ~ "SpO\u2082, %",
+      "hb_t0"                 ~ "Haemoglobin, g/L",
+      "albumin_t0"            ~ "Albumin, g/L",
+      "creatinine_t0"         ~ "Creatinine, \u00b5mol/L",
+      "urea_t0"               ~ "Urea, mmol/L",
+      "urea_creat_ratio_t0"   ~ "Urea:creatinine ratio",
+      "na_t0"                 ~ "Sodium, mmol/L",
+      "k_t0"                  ~ "Potassium, mmol/L",
+      "cl_t0"                 ~ "Chloride, mmol/L",
+      "alt_t0"                ~ "Alanine aminotransferase, U/L",
+      "ast_t0"                ~ "Aspartate aminotransferase, U/L",
+      "ph_t0"                 ~ "Arterial pH",
+      "po2_kpa_t0"            ~ "PaO\u2082, kPa",
+      "pco2_kpa_t0"           ~ "PaCO\u2082, kPa",
+      "hco3_t0"               ~ "Bicarbonate, mmol/L",
+      "fluphenazine"              ~ "Fluphenazine",
+      "benzodiazepine_sedatives"  ~ "Benzodiazepine/sedatives",
+      "opioid_analgesics"         ~ "Opioid analgesics",
+      "nonsteroidal_analgesics"   ~ "NSAIDs",
+      "other_psychotropic_drugs"  ~ "Other psychotropic drugs",
+      "anaes_tiva"                ~ "Anaesthesia: TIVA",
+      "anaes_volatile"            ~ "Anaesthesia: volatile",
+      "anaes_regional"            ~ "Anaesthesia: regional",
+      .default = Variable_Clean
+    )
+  )
+
+# Get dynamic counts for the subheaders
+n_deriv <- sum(cohort_full$cohort_assignment == "Derivation")
+n_val   <- sum(cohort_full$cohort_assignment == "Validation")
+
+tableS3 <- flextable(overview_df,
+          col_keys = c("Label", 
+                       "Deriv_Missing", "Deriv_Summary", "Deriv_Range", 
+                       "Val_Missing", "Val_Summary", "Val_Range")) |>
+  set_header_labels(
+    Label          = "Variable",
+    Deriv_Missing  = "Missing, n (%)",
+    Deriv_Summary  = "Mean (SD) or n (%)",
+    Deriv_Range    = "Observed range",
+    Val_Missing    = "Missing, n (%)",
+    Val_Summary    = "Mean (SD) or n (%)",
+    Val_Range      = "Observed range"
+  ) |>
+  add_header_row(
+    values = c("", 
+               paste0("Derivation Cohort (n = ", n_deriv, ")"), 
+               paste0("Validation Cohort (n = ", n_val, ")")),
+    colwidths = c(1, 3, 3)
+  ) |>
+  color(i = ~max_miss_pct > 5,  j = c("Deriv_Missing", "Val_Missing"), color = "firebrick") |>
+  color(i = ~max_miss_pct > 20, j = c("Deriv_Missing", "Val_Missing"), color = "darkred")   |>
+  bold( i = ~max_miss_pct > 5,  j = c("Deriv_Missing", "Val_Missing"))  |>
+  theme_booktabs() |>
+  set_caption("Table S3. Data completeness and descriptive summary of all candidate predictors split by cohort assignment") |>
+  add_footer_lines(paste0(
+    "Values are mean (SD) for continuous variables or n (%) for binary/categorical variables. ",
+    "Missing values flagged in red (>5%) or dark red (>20%)."
+  )) |>
+  italic(part = "footer") |>
+  fontsize(size = 9, part = "footer")
+
+# Save supplementary table
+flextable::save_as_docx(tableS3, path = here("outputs", "tables", "supplementary", "tableS3_data_completeness.docx"))
+tableS3
+```
+
+## Supplementary Table 4: Delirium Incidence by Centre
+```{r incidence_by_centre}
+ft_centre <- by_centre_table |>
+  journal_table(
+    caption  = "Table S4. Delirium incidence by recruiting centre",
+    footnote = "Incidence expressed as proportion of patients developing delirium within 7 days."
+  )
+
+# Save to your supplementary tables folder
+flextable::save_as_docx(ft_centre, path = here("outputs", "tables", "supplementary", "tableS4_incidence_by_centre.docx"))
+ft_centre
+```
+
+# Supplementary Table 5: Threshold metrics (recalibrated) 
+```{r clinical_threshold_metrics_recalibrated}
+calculate_threshold_metrics <- function(obs, pred, threshold) {
+  keep <- !is.na(obs) & !is.na(pred)
+  obs  <- obs[keep]; pred <- pred[keep]
+  n    <- length(obs)
+  
+  pred_class  <- if_else(pred >= threshold, 1, 0)
+  obs_numeric <- as.numeric(as.character(obs))
+  
+  tp <- sum(pred_class == 1 & obs_numeric == 1)
+  fp <- sum(pred_class == 1 & obs_numeric == 0)
+  tn <- sum(pred_class == 0 & obs_numeric == 0)
+  fn <- sum(pred_class == 0 & obs_numeric == 1)
+  
+  sens <- tp / max(1, (tp + fn))
+  spec <- tn / max(1, (tn + fp))
+  ppv  <- tp / max(1, (tp + fp))
+  npv  <- tn / max(1, (tn + fn))
+  
+  nb   <- (tp / n) - (fp / n) * (threshold / (1 - threshold))
+  
+  tibble(
+    Sensitivity = sprintf("%.1f%%", sens * 100),
+    Specificity = sprintf("%.1f%%", spec * 100),
+    PPV         = sprintf("%.1f%%", ppv * 100),
+    NPV         = sprintf("%.1f%%", npv * 100),
+    `Net Benefit` = sprintf("%.3f", nb)
+  )
+}
+
+calc_all_thresholds_recal <- function(threshold) {
+  bind_rows(
+    calculate_threshold_metrics(rc$core_obs,       rc$core_recal,       threshold) |> mutate(Model = "Parsimonious Model"),
+    calculate_threshold_metrics(rc$pre_lasso_obs,  rc$pre_lasso_recal,  threshold) |> mutate(Model = "Pre-op LASSO"),
+    calculate_threshold_metrics(rc$pre_xgb_obs,    rc$pre_xgb_recal,    threshold) |> mutate(Model = "Pre-op XGBoost"),
+    calculate_threshold_metrics(rc$post_lasso_obs, rc$post_lasso_recal, threshold) |> mutate(Model = "Post-op LASSO"),
+    calculate_threshold_metrics(rc$post_xgb_obs,   rc$post_xgb_recal,   threshold) |> mutate(Model = "Post-op XGBoost")
+  ) |> select(Model, Sensitivity, Specificity, PPV, NPV, `Net Benefit`)
+}
+
+threshold_table_data <- bind_rows(
+  calc_all_thresholds_recal(0.05) |> mutate(Threshold = "5% Risk Threshold"),
+  calc_all_thresholds_recal(0.10) |> mutate(Threshold = "10% Risk Threshold"),
+  calc_all_thresholds_recal(0.15) |> mutate(Threshold = "15% Risk Threshold")
+) |> select(Threshold, Model, Sensitivity, Specificity, PPV, NPV, `Net Benefit`)
+
+ft5 <- threshold_table_data |>
+  flextable() |>
+  theme_booktabs() |>
+  bold(part = "header") |>
+  font(fontname = "Arial", part = "all") |>
+  fontsize(size = 9, part = "all") |>
+  align(align = "center", part = "header") |>
+  align(align = "left",   j = 1:2, part = "body") |>
+  align(align = "center", j = 3:7, part = "body") |>
+  merge_v(j = 1) |>
+  valign(j = 1, valign = "top") |>
+  hline(i = c(5, 10), border = officer::fp_border(color = "#CCCCCC", width = 0.5)) |>
+  set_caption("Table S5. Bedside decision classification performance and Net Benefit evaluated on the independent external validation cohort") |>
+  add_footer_lines(paste0(
+    "Performance evaluated using logistic recalibrated probabilities on the validation sub-cohort. ",
+    "Net Benefit is calculated as (True Positives / N) - (False Positives / N) * (Threshold / (1 - Threshold))."
+  )) |>
+  italic(part = "footer") |>
+  fontsize(size = 8.5, part = "footer") |>
+  autofit()
+
+flextable::save_as_docx(ft5, path = here("outputs", "tables", "supplementary", "tableS5_clinical_thresholds.docx"))
+ft5
+```
