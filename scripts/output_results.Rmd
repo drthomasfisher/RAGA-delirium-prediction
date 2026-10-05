@@ -771,7 +771,6 @@ pred_table <- tibble::tribble(
   "Chloride, mmol/L",                  "✓", "✓", "",
   "ALT, U/L",                          "✓", "✓", "",
   "AST, U/L",                          "✓", "✓", "",
-  "Oxygen saturation, %",              "✓", "✓", "",
   "Anaesthesia type (TIVA/Volatile/Regional)", "", "✓", "",
   "Intra-operative hypotension",       "",  "✓", "",
   "Hypotension requiring medication",  "",  "✓", "",
@@ -791,7 +790,7 @@ pred_table |>
   add_footer_lines(paste0(
     "✓ = predictor made available to this model. Pre-op and intra-op models = the LASSO and XGBoost models ",
     "for each time point, which shared the same candidate predictors. Missing continuous values were imputed ",
-    "with derivation-cohort medians. Arterial blood gas values (pH, PaO₂, PaCO₂, bicarbonate) were not offered to the models because they were missing in over half of patients (Table S3)."
+    "with derivation-cohort medians. Arterial blood gas values (pH, PaO₂, PaCO₂, bicarbonate, oxygen saturation) were not offered to the models because they were missing in over half of patients (Table S3)."
   )) |>
   fontsize(size = 9, part = "all") |>
   fixed_widths(c(3.6, 0.9, 0.9, 0.9)) |>
@@ -962,7 +961,7 @@ tableS3 <- flextable(overview_df,
   set_caption("Table S3. Data completeness and descriptive summary of all candidate predictors split by cohort assignment") |>
   add_footer_lines(paste0(
     "Values are mean (SD) for continuous variables or n (%) for binary/categorical variables. ",
-    "Missing values flagged in red (>5%) or dark red (>20%). Arterial blood gas values were not used as candidate predictors."
+    "Missing values flagged in red (>5%) or dark red (>20%). Arterial blood gas values and oxygen saturation were not used as candidate predictors."
   )) |>
   italic(part = "footer") |>
   fontsize(size = 9, part = "footer")
@@ -1038,8 +1037,8 @@ ft5 <- s5_data |>
   set_caption("Table S5. Classification performance and net benefit at clinically relevant risk thresholds in the validation cohort") |>
   add_footer_lines(paste0(
     "Above threshold: patients with predicted risk at or above the threshold. Net benefit 95% CIs by bootstrap. ",
-    "Recalibration was logistic, cross-validated within the validation cohort. As developed, XGBoost predictions rarely ",
-    "reached 10% (maximum 11% and 9%)."
+    "Recalibration was logistic, cross-validated within the validation cohort. As developed, XGBoost predictions never ",
+    "reached 10% (maximum 9% and 8%)."
   )) |>
   italic(part = "footer") |>
   fontsize(size = 7.5, part = "footer") |>

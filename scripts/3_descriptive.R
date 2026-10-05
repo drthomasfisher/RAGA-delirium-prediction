@@ -32,15 +32,16 @@ t0_vars <- c(
 
 # --- Pre-op Vitals, Labs & Cognitive Scores (T0) ---
 lab_vars <- c(
-  "temp_t0", "sysbp_t0", "diabp_t0", "hr_t0", "spo2_t0",
+  "temp_t0", "sysbp_t0", "diabp_t0", "hr_t0",
   "hb_t0", "albumin_t0", "creatinine_t0", "urea_t0",
   "na_t0", "k_t0", "cl_t0", "alt_t0", "ast_t0",
   "cog_mmse_pre", "urea_creat_ratio_t0"
 )
 
-# Arterial blood gas values were missing in over half of patients, so they are kept for
-# description (Supplementary Table S3) but not offered to the models as candidate predictors.
-abg_vars <- c("ph_t0", "po2_kpa_t0", "pco2_kpa_t0", "hco3_t0")
+# Arterial blood gas values (and the oxygen saturation that comes with them) were missing in
+# over half of patients, so they are kept for description (Supplementary Table S3) but not
+# offered to the models as candidate predictors.
+abg_vars <- c("ph_t0", "po2_kpa_t0", "pco2_kpa_t0", "hco3_t0", "spo2_t0")
 
 # 3. SWIVEL AND CLEAN INTRA-OPERATIVE ANESTHETIC DRUGS & ADJUNCTS
 message("Processing intra-operative drug logs...")

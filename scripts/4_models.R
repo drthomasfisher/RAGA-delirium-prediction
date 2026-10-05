@@ -732,6 +732,7 @@ sophisticated_results <- list(
   stab_freq_pre = stab_pre$freq, stab_freq_post = stab_post$freq,
   internal_validation = internal_validation,
   boot_var_sets_pre = attr(opt_pre_l, "var_sets"), boot_var_sets_post = attr(opt_post_l, "var_sets"),
+  xgb_nrounds = c(pre = m_x_pre$niter, post = m_x_post$niter),
   core_deriv_data = core_data_subset_clean, core_val_data = core_val_clean
 )
 
