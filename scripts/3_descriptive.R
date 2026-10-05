@@ -27,7 +27,7 @@ master <- purrr::reduce(extract_dfs(master_list), full_join, by = "id")
 t0_vars <- c(
   "age_years", "sex", "bmi", "asa_status", "fracture_type",
   "cardiovascular", "respiratory", "cns", "urinary_tract",
-  "cog_pre_dementia_flag", "education_level", "ph_missing_flag"
+  "cog_pre_dementia_flag", "education_level"
 )
 
 # --- Pre-op Vitals, Labs & Cognitive Scores (T0) ---
@@ -35,9 +35,12 @@ lab_vars <- c(
   "temp_t0", "sysbp_t0", "diabp_t0", "hr_t0", "spo2_t0",
   "hb_t0", "albumin_t0", "creatinine_t0", "urea_t0",
   "na_t0", "k_t0", "cl_t0", "alt_t0", "ast_t0",
-  "ph_t0", "po2_kpa_t0", "pco2_kpa_t0", "hco3_t0",
   "cog_mmse_pre", "urea_creat_ratio_t0"
 )
+
+# Arterial blood gas values were missing in over half of patients, so they are kept for
+# description (Supplementary Table S3) but not offered to the models as candidate predictors.
+abg_vars <- c("ph_t0", "po2_kpa_t0", "pco2_kpa_t0", "hco3_t0")
 
 # 3. SWIVEL AND CLEAN INTRA-OPERATIVE ANESTHETIC DRUGS & ADJUNCTS
 message("Processing intra-operative drug logs...")
@@ -216,12 +219,12 @@ cohort_cleaned <- c3 %>%
       TRUE ~ NA_integer_
     )
   ) %>%
-  mutate(across(any_of(c(lab_vars, "age_years", "bmi", "asa_status")), 
+  mutate(across(any_of(c(lab_vars, abg_vars, "age_years", "bmi", "asa_status")), 
                 ~suppressWarnings(as.numeric(as.character(.))))) %>%
   mutate(
     age_years = if_else(age_years < 40 | age_years > 110, NA_real_, age_years)
   ) %>%
-  mutate(across(any_of(c(lab_vars, "duration_hrs", "estimated_blood_loss", "bmi")),
+  mutate(across(any_of(c(lab_vars, abg_vars, "duration_hrs", "estimated_blood_loss", "bmi")),
                 ~winsorise_vec(.x, cohort_assignment == "Derivation"))) %>%
   mutate(
     urea_creat_ratio_t0 = (urea_t0 / creatinine_t0) * 1000
@@ -370,6 +373,7 @@ save(
   # Reference Indexes
   t0_vars, 
   lab_vars,
+  abg_vars,
   intraop_vars,
   exclusion_summary, 
   table1_flex, 

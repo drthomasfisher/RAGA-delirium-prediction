@@ -757,7 +757,6 @@ pred_table <- tibble::tribble(
   "Pre-existing dementia",             "✓", "✓", "✓",
   "MMSE score",                        "✓", "✓", "",
   "Education level",                   "✓", "✓", "",
-  "pH missingness indicator",          "✓", "✓", "",
   "Temperature, °C",                   "✓", "✓", "",
   "Systolic blood pressure, mmHg",     "✓", "✓", "",
   "Diastolic blood pressure, mmHg",    "✓", "✓", "",
@@ -773,10 +772,6 @@ pred_table <- tibble::tribble(
   "ALT, U/L",                          "✓", "✓", "",
   "AST, U/L",                          "✓", "✓", "",
   "Oxygen saturation, %",              "✓", "✓", "",
-  "Arterial pH",                       "✓", "✓", "",
-  "PaO₂, kPa",                         "✓", "✓", "",
-  "PaCO₂, kPa",                        "✓", "✓", "",
-  "Bicarbonate, mmol/L",               "✓", "✓", "",
   "Anaesthesia type (TIVA/Volatile/Regional)", "", "✓", "",
   "Intra-operative hypotension",       "",  "✓", "",
   "Hypotension requiring medication",  "",  "✓", "",
@@ -796,7 +791,7 @@ pred_table |>
   add_footer_lines(paste0(
     "✓ = predictor made available to this model. Pre-op and intra-op models = the LASSO and XGBoost models ",
     "for each time point, which shared the same candidate predictors. Missing continuous values were imputed ",
-    "with derivation-cohort medians; the arterial blood gas variables are accompanied by the pH missingness indicator."
+    "with derivation-cohort medians. Arterial blood gas values (pH, PaO₂, PaCO₂, bicarbonate) were not offered to the models because they were missing in over half of patients (Table S3)."
   )) |>
   fontsize(size = 9, part = "all") |>
   fixed_widths(c(3.6, 0.9, 0.9, 0.9)) |>
@@ -815,6 +810,7 @@ new_drug_vars <- names(cohort_full) %>%
 all_model_vars <- unique(c(
   t0_vars, 
   lab_vars, 
+  abg_vars,
   "map_t0", 
   "urea_creat_ratio_t0", 
   "blood_transfusion",
@@ -966,7 +962,7 @@ tableS3 <- flextable(overview_df,
   set_caption("Table S3. Data completeness and descriptive summary of all candidate predictors split by cohort assignment") |>
   add_footer_lines(paste0(
     "Values are mean (SD) for continuous variables or n (%) for binary/categorical variables. ",
-    "Missing values flagged in red (>5%) or dark red (>20%)."
+    "Missing values flagged in red (>5%) or dark red (>20%). Arterial blood gas values were not used as candidate predictors."
   )) |>
   italic(part = "footer") |>
   fontsize(size = 9, part = "footer")
@@ -1042,8 +1038,8 @@ ft5 <- s5_data |>
   set_caption("Table S5. Classification performance and net benefit at clinically relevant risk thresholds in the validation cohort") |>
   add_footer_lines(paste0(
     "Above threshold: patients with predicted risk at or above the threshold. Net benefit 95% CIs by bootstrap. ",
-    "Recalibration was logistic, cross-validated within the validation cohort. As developed, no XGBoost prediction ",
-    "reached 10% (maximum 8% and 9%)."
+    "Recalibration was logistic, cross-validated within the validation cohort. As developed, XGBoost predictions rarely ",
+    "reached 10% (maximum 11% and 9%)."
   )) |>
   italic(part = "footer") |>
   fontsize(size = 7.5, part = "footer") |>
@@ -1068,11 +1064,9 @@ s6_data <- val_metrics |>
   arrange(Model) |>
   transmute(
     Model = as.character(Model),
-    `Brier (95% CI)`       = fmt_ci(Brier, Brier_LCI, Brier_UCI, 3, "
+    `Brier (95% CI)` = fmt_ci(Brier, Brier_LCI, Brier_UCI, 3, "
 "),
-    `O:E (95% CI)`         = fmt_ci(OE, OE_LCI, OE_UCI, 2, "
-"),
-    `ICI (95% CI)`         = fmt_ci(ICI, ICI_LCI, ICI_UCI, 3, "
+    `ICI (95% CI)`   = fmt_ci(ICI, ICI_LCI, ICI_UCI, 3, "
 "),
     `AUROC difference from primary model (95% CI)` = if_else(is.na(Diff), "—", fmt_ci(Diff, LCI, UCI, 3, "
 "))
@@ -1085,11 +1079,11 @@ ft6 <- s6_data |>
   font(fontname = "Arial", part = "all") |>
   fontsize(size = 8, part = "all") |>
   align(align = "center", part = "header") |>
-  align(align = "center", j = 2:5, part = "body") |>
-  set_caption("Table S6. Brier score, observed:expected ratio and integrated calibration index in the validation cohort, and AUROC difference from the primary model") |>
-  add_footer_lines("O:E, observed:expected events; ICI, integrated calibration index. Confidence intervals by bootstrap.") |>
+  align(align = "center", j = 2:4, part = "body") |>
+  set_caption("Table S6. Brier score and integrated calibration index in the validation cohort, and AUROC difference from the primary model") |>
+  add_footer_lines("ICI, integrated calibration index. Confidence intervals by bootstrap.") |>
   fontsize(size = 7.5, part = "footer") |>
-  fixed_widths(c(1.3, 1.3, 1.3, 1.3, 1.6))
+  fixed_widths(c(1.5, 1.5, 1.5, 2.0))
 
 flextable::save_as_docx(ft6, path = here("outputs", "tables", "supplementary", "tableS6_validation_detail.docx"))
 ft6

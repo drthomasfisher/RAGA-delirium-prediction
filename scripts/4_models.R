@@ -42,8 +42,7 @@ make_xy <- function(df, outcome = "delirium_7d", medians = NULL) {
   feature_vars <- c(
     if (exists("t0_vars"))      t0_vars      else character(0),
     if (exists("lab_vars"))     lab_vars     else character(0),
-    if (exists("intraop_vars")) intraop_vars else character(0),
-    "ph_missing_flag"
+    if (exists("intraop_vars")) intraop_vars else character(0)
   )
 
   df_clean <- df |>
