@@ -13,6 +13,7 @@ library(broom)
 library(here)
 
 NoSleepR::nosleep_on()
+set.seed(20260910)
 n_cores <- min(4, max(1, parallel::detectCores() - 1))
 plan(multisession, workers = n_cores)
 
@@ -88,15 +89,15 @@ make_xy <- function(df, outcome = "delirium_7d", medians = NULL) {
   list(X = X, y = y, medians = medians)
 }
 
-DROPOUT_VARS <- c("ph_t0", "po2_kpa_t0", "pco2_kpa_t0", "hco3_t0", "spo2_t0")
-CORE_VARS    <- c("age_years", "urea_t0", "cog_pre_dementia_flag")
+CORE_VARS   <- c("age_years", "urea_t0", "cog_pre_dementia_flag")
 
-fit_xgb <- function(X, y, nrounds = NULL) {
+fit_xgb <- function(X, y, nrounds = NULL, groups = NULL) {
   if (!exists("xgb_params")) stop("xgb_params not found. Run section 4 first.")
   if (is.null(nrounds)) {
+    folds <- if (is.null(groups)) NULL else split(seq_along(y), grouped_folds(groups, 5))
     cv <- xgb.cv(
       params = xgb_params, data = xgb.DMatrix(X, label = y),
-      nrounds = 500, nfold = 5, early_stopping_rounds = 20,
+      nrounds = 500, nfold = 5, folds = folds, early_stopping_rounds = 20,
       metrics = "logloss", verbose = 0
     )
     nrounds <- cv$best_iteration
@@ -197,86 +198,51 @@ get_optimism_corrected_auc_glm <- function(df, n_boot = 1000) {
                                    quiet = TRUE)$auc)
   message(sprintf("  -> Optimism correction Core GLM (n=%d, n_boot=%d)...", nrow(df), n_boot))
 
-  optimism_vals <- future_map_dbl(seq_len(n_boot), function(i) {
+  p_hat <- predict(fit_orig, type = "response")
+
+  boot <- future_map(seq_len(n_boot), function(i) {
     idx     <- sample(nrow(df), replace = TRUE)
     boot_df <- df[idx, ]
-    if (length(unique(boot_df$delirium_7d)) < 2) return(NA_real_)
+    if (length(unique(boot_df$delirium_7d)) < 2) return(NULL)
 
     fit_b  <- glm(formula_core, data = boot_df, family = "binomial")
     p_boot <- predict(fit_b, newdata = boot_df, type = "response")
     p_orig <- predict(fit_b, newdata = df,      type = "response")
 
-    if (length(p_boot) != nrow(boot_df) || length(p_orig) != nrow(df)) return(NA_real_)
+    list(opt    = auc_of(boot_df$delirium_7d, p_boot) - auc_of(df$delirium_7d, p_orig),
+         slope  = calib_slope(df$delirium_7d, p_orig),
+         absdev = abs(p_orig - p_hat))
+  }, .options = furrr_options(seed = TRUE, packages = "pROC"))
 
-    as.numeric(pROC::roc(boot_df$delirium_7d, p_boot, quiet = TRUE)$auc) -
-      as.numeric(pROC::roc(df$delirium_7d,    p_orig, quiet = TRUE)$auc)
-  }, .options = furrr_options(seed = TRUE))
-
-  optimism <- mean(optimism_vals, na.rm = TRUE)
-  tibble(Apparent_AUC           = orig_auc,
-         Optimism               = optimism,
-         Optimism_Corrected_AUC = orig_auc - optimism)
+  summarise_boot(orig_auc, boot)
 }
 
-get_optimism_corrected_auc <- function(df, model_type = c("lasso", "xgb"), n_boot = NULL) {
-  model_type <- match.arg(model_type)
-  if (is.null(n_boot)) n_boot <- if (model_type == "xgb") 200L else 1000L
+# The number of boosting rounds is re-tuned by cross-validation inside every replicate
+# (fit_xgb with nrounds = NULL), so tuning is part of what the bootstrap corrects for.
+get_optimism_corrected_auc_xgb <- function(df, X_orig, y_orig, fit_orig, n_boot = 1000) {
+  p_hat        <- predict(fit_orig, xgb.DMatrix(X_orig))
+  apparent_auc <- auc_of(y_orig, p_hat)
+  message(sprintf("  -> Optimism correction xgb, nrounds re-tuned per replicate (n_boot=%d)...", n_boot))
 
-  orig_obj <- make_xy(df)
-  X_orig   <- orig_obj$X; colnames(X_orig) <- make.names(colnames(X_orig))
-  y_orig   <- orig_obj$y
-
-  fixed_nrounds <- NULL
-
-  fit_orig <- if (model_type == "lasso") {
-    cv.glmnet(X_orig, y_orig, family = "binomial", maxit = 1e6, thresh = 1e-7)
-  } else {
-    cv <- xgb.cv(params = xgb_params, data = xgb.DMatrix(X_orig, label = y_orig),
-                 nrounds = 500, nfold = 5, early_stopping_rounds = 20,
-                 metrics = "logloss", verbose = 0)
-    fixed_nrounds <- cv$best_iteration
-    if (is.null(fixed_nrounds) || is.na(fixed_nrounds)) fixed_nrounds <- 200L
-    message(sprintf("  -> XGBoost nrounds fixed at %d for bootstrap", fixed_nrounds))
-    fit_xgb(X_orig, y_orig, nrounds = fixed_nrounds)
-  }
-
-  pred_orig <- if (model_type == "lasso") {
-    as.numeric(predict(fit_orig, X_orig, s = "lambda.min", type = "response")[, 1, drop = TRUE])
-  } else {
-    predict(fit_orig, xgb.DMatrix(X_orig))
-  }
-
-  apparent_auc <- as.numeric(pROC::roc(y_orig, pred_orig, quiet = TRUE)$auc)
-  message(sprintf("  -> Optimism correction %s (n_boot=%d)...", model_type, n_boot))
-
-  optimism_vals <- future_map_dbl(seq_len(n_boot), function(i) {
+  boot <- future_map(seq_len(n_boot), function(i) {
     idx     <- sample(seq_len(nrow(df)), replace = TRUE)
     boot_df <- df[idx, ]
-    if (length(unique(boot_df$delirium_7d)) < 2) return(NA_real_)
+    if (length(unique(boot_df$delirium_7d)) < 2) return(NULL)
 
-    boot_obj   <- make_xy(boot_df)
-    X_boot_raw <- boot_obj$X; colnames(X_boot_raw) <- make.names(colnames(X_boot_raw))
-    y_boot     <- boot_obj$y
-    X_boot     <- align_features(X_orig, X_boot_raw)
+    boot_obj <- make_xy(boot_df)
+    X_boot   <- boot_obj$X; colnames(X_boot) <- make.names(colnames(X_boot))
+    X_boot   <- align_features(X_orig, X_boot)
 
-    if (model_type == "lasso") {
-      cv_b   <- glmnet::cv.glmnet(X_boot, y_boot, family = "binomial", maxit = 1e6, thresh = 1e-7)
-      p_boot <- as.numeric(predict(cv_b, X_boot, s = "lambda.min", type = "response")[, 1, drop = TRUE])
-      p_orig <- as.numeric(predict(cv_b, X_orig, s = "lambda.min", type = "response")[, 1, drop = TRUE])
-    } else {
-      fit_b  <- fit_xgb(X_boot, y_boot, nrounds = fixed_nrounds)
-      p_boot <- predict(fit_b, xgb.DMatrix(X_boot))
-      p_orig <- predict(fit_b, xgb.DMatrix(X_orig))
-    }
+    fit_b  <- fit_xgb(X_boot, boot_obj$y, groups = idx)
+    p_boot <- predict(fit_b, xgb.DMatrix(X_boot))
+    p_orig <- predict(fit_b, xgb.DMatrix(X_orig))
 
-    as.numeric(pROC::roc(y_boot, p_boot, quiet = TRUE)$auc) -
-      as.numeric(pROC::roc(y_orig, p_orig, quiet = TRUE)$auc)
-  }, .options = furrr_options(seed = TRUE))
+    list(opt    = auc_of(boot_obj$y, p_boot) - auc_of(y_orig, p_orig),
+         slope  = calib_slope(y_orig, p_orig),
+         absdev = abs(p_orig - p_hat))
+  }, .options = furrr_options(seed = TRUE, packages = c("xgboost", "pROC", "dplyr", "tidyr", "forcats")))
 
-  optimism <- mean(optimism_vals, na.rm = TRUE)
-  tibble(Apparent_AUC           = apparent_auc,
-         Optimism               = optimism,
-         Optimism_Corrected_AUC = apparent_auc - optimism)
+  summarise_boot(apparent_auc, boot)
 }
 
 make_cal_plot <- function(obs, pred, title) {
@@ -321,6 +287,96 @@ extract_lasso_coefs <- function(model, X, y, n_boot = 1000) {
   return(boot_df)
 }
 
+# groups: original patient index for bootstrap samples, so that every copy of a patient
+# falls in the same CV fold (otherwise duplicates leak across folds and lambda is too small)
+grouped_folds <- function(groups, k) {
+  ug <- unique(groups)
+  sample(rep_len(seq_len(k), length(ug)))[match(groups, ug)]
+}
+
+stability_select <- function(X, y, n_reps = 100, threshold = 0.5, base_seed = 20260910, groups = NULL) {
+  selected <- matrix(0L, nrow = n_reps, ncol = ncol(X), dimnames = list(NULL, colnames(X)))
+  for (i in seq_len(n_reps)) {
+    set.seed(base_seed + i)
+    cv_i <- if (is.null(groups)) {
+      cv.glmnet(X, y, family = "binomial", maxit = 1e6, thresh = 1e-7)
+    } else {
+      cv.glmnet(X, y, family = "binomial", foldid = grouped_folds(groups, 10), maxit = 1e6, thresh = 1e-7)
+    }
+    ci   <- as.matrix(coef(cv_i, s = "lambda.min"))
+    nz   <- rownames(ci)[ci[, 1] != 0 & rownames(ci) != "(Intercept)"]
+    selected[i, nz] <- 1L
+  }
+  freq <- sort(colMeans(selected), decreasing = TRUE)
+  list(freq = freq, stable_vars = names(freq)[freq >= threshold])
+}
+
+refit_stable <- function(X, y, stable_vars) {
+  df <- as.data.frame(X[, stable_vars, drop = FALSE])
+  df$delirium_7d <- y
+  glm(delirium_7d ~ ., data = df, family = "binomial")
+}
+
+calib_slope <- function(y, p) {
+  lp <- qlogis(pmin(pmax(p, 1e-4), 1 - 1e-4))
+  unname(coef(glm(y ~ lp, family = "binomial"))[2])
+}
+
+auc_of <- function(y, p) as.numeric(pROC::roc(y, p, quiet = TRUE)$auc)
+
+# Harrell bootstrap summary: optimism in AUC, calibration slope of each bootstrap model
+# applied to the original data (i.e. the shrinkage estimate), and prediction instability
+# (mean absolute difference between bootstrap-model and final-model predictions, per patient)
+summarise_boot <- function(apparent_auc, boot) {
+  boot  <- Filter(Negate(is.null), boot)
+  opt   <- vapply(boot, `[[`, numeric(1), "opt")
+  slope <- vapply(boot, `[[`, numeric(1), "slope")
+  indiv <- colMeans(do.call(rbind, lapply(boot, `[[`, "absdev")))
+  tibble(Apparent_AUC           = apparent_auc,
+         Optimism               = mean(opt),
+         Optimism_Corrected_AUC = apparent_auc - mean(opt),
+         Corrected_Slope        = mean(slope, na.rm = TRUE),
+         MAPE                   = mean(indiv),
+         MAPE_p95               = unname(quantile(indiv, 0.95)),
+         n_boot                 = length(boot))
+}
+
+# Stability selection is repeated inside every bootstrap replicate, otherwise the
+# variable-selection step escapes the optimism correction entirely.
+get_optimism_corrected_auc_stab <- function(X, y, fit_orig, final_vars, n_boot = 200, n_reps = 100) {
+  p_hat        <- as.numeric(predict(fit_orig, type = "response"))
+  apparent_auc <- auc_of(y, p_hat)
+  message(sprintf("  -> Optimism correction, stability selection repeated per replicate (n_boot=%d)...", n_boot))
+
+  boot <- future_map(seq_len(n_boot), function(b) {
+    idx <- sample(length(y), replace = TRUE)
+    Xb  <- X[idx, , drop = FALSE]; yb <- y[idx]
+    if (length(unique(yb)) < 2) return(NULL)
+
+    vars_b <- stability_select(Xb, yb, n_reps, base_seed = 20260910 + 1000 * b, groups = idx)$stable_vars
+    if (length(vars_b) == 0) {
+      p_boot <- rep(mean(yb), length(yb))
+      p_orig <- rep(mean(yb), length(y))
+    } else {
+      fit_b  <- refit_stable(Xb, yb, vars_b)
+      p_boot <- as.numeric(predict(fit_b, type = "response"))
+      p_orig <- as.numeric(predict(fit_b, newdata = as.data.frame(X[, vars_b, drop = FALSE]), type = "response"))
+    }
+
+    list(opt    = auc_of(yb, p_boot) - auc_of(y, p_orig),
+         slope  = if (length(vars_b) == 0) NA_real_ else calib_slope(y, p_orig),
+         absdev = abs(p_orig - p_hat),
+         vars   = paste(sort(vars_b), collapse = " + "))
+  }, .options = furrr_options(seed = TRUE, packages = c("glmnet", "pROC")))
+
+  boot     <- Filter(Negate(is.null), boot)
+  var_sets <- vapply(boot, `[[`, character(1), "vars")
+  out      <- summarise_boot(apparent_auc, boot)
+  out$Same_Set_Pct <- mean(var_sets == paste(sort(final_vars), collapse = " + "))
+  attr(out, "var_sets") <- var_sets
+  out
+}
+
 # 3. COHORT PREVALENCE FILTERING
 message("=== Applying Prevalence Filter ===")
 load(here("data_interim", "model_cohorts.RData"))
@@ -344,7 +400,7 @@ valid_drug_vars <- cohort_postop_df |>
   filter(prev >= 0.05) |>
   pull(var)
 
-# 3. Reconstruct full post-operative predictor list
+# 3. Reconstruct full intraoperative predictor list
 non_drug_intraop <- c(
   "anaes_tiva", "anaes_volatile", "anaes_regional",
   "intraop_hypotension", "hypotension_medicated",
@@ -376,10 +432,20 @@ xgb_params <- list(
   base_score       = prevalence
 )
 
-m_l_pre  <- cv.glmnet(pre_X,  pre_xy$y,  family = "binomial", maxit = 1e6, thresh = 1e-7)
 m_x_pre  <- fit_xgb(pre_X,  pre_xy$y)
-m_l_post <- cv.glmnet(post_X, post_xy$y, family = "binomial", maxit = 1e6, thresh = 1e-7)
 m_x_post <- fit_xgb(post_X, post_xy$y)
+
+# LASSO variable selection is unstable with this few events, so rather than
+# report one arbitrarily-seeded cv.glmnet fit, select variables by frequency across 100
+# resampled fits and refit an unpenalised GLM on whatever clears the 50% threshold.
+message("Running LASSO stability selection (100 resamples)...")
+stab_pre  <- stability_select(pre_X,  pre_xy$y)
+stab_post <- stability_select(post_X, post_xy$y)
+message(sprintf("  -> Pre-op stable variables (>=50%% selection): %s", paste(stab_pre$stable_vars, collapse = ", ")))
+message(sprintf("  -> Intra-op stable variables (>=50%% selection): %s", paste(stab_post$stable_vars, collapse = ", ")))
+
+m_l_pre_stab  <- refit_stable(pre_X,  pre_xy$y,  stab_pre$stable_vars)
+m_l_post_stab <- refit_stable(post_X, post_xy$y, stab_post$stable_vars)
 
 core_data_subset_clean <- core_data_subset |>
   mutate(across(all_of(CORE_VARS), ~ {
@@ -412,51 +478,61 @@ core_val_clean <- core_val |>
 stopifnot(all(pre_xy_val$y == post_xy_val$y))
 stopifnot(all(core_val_clean$id %in% pre_val$id))
 
-#  5. PREDICTIONS 
-pred_l_pre  <- as.numeric(predict(m_l_pre,  pre_X,  s = "lambda.min", type = "response")[, 1, drop = TRUE])
+#  5. PREDICTIONS
+pred_l_pre  <- as.numeric(predict(m_l_pre_stab,  type = "response"))
 pred_x_pre  <- as.numeric(predict(m_x_pre,  xgb.DMatrix(pre_X)))
-pred_l_post <- as.numeric(predict(m_l_post, post_X, s = "lambda.min", type = "response")[, 1, drop = TRUE])
+pred_l_post <- as.numeric(predict(m_l_post_stab, type = "response"))
 pred_x_post <- as.numeric(predict(m_x_post, xgb.DMatrix(post_X)))
 pred_l_core <- as.numeric(predict(m_l_core, type = "response"))
 
-pred_l_pre_val  <- as.numeric(predict(m_l_pre,  pre_X_val,  s = "lambda.min", type = "response")[, 1, drop = TRUE])
+pred_l_pre_val  <- as.numeric(predict(m_l_pre_stab,  newdata = as.data.frame(pre_X_val[, stab_pre$stable_vars, drop = FALSE]), type = "response"))
 pred_x_pre_val  <- as.numeric(predict(m_x_pre,  xgb.DMatrix(pre_X_val)))
-pred_l_post_val <- as.numeric(predict(m_l_post, post_X_val, s = "lambda.min", type = "response")[, 1, drop = TRUE])
+pred_l_post_val <- as.numeric(predict(m_l_post_stab, newdata = as.data.frame(post_X_val[, stab_post$stable_vars, drop = FALSE]), type = "response"))
 pred_x_post_val <- as.numeric(predict(m_x_post, xgb.DMatrix(post_X_val)))
 
 pred_l_core_val <- as.numeric(predict(m_l_core, newdata = core_val_clean, type = "response"))
 stopifnot(length(pred_l_core_val) == nrow(core_val_clean))
+
 
 #  6. PERFORMANCE METRICS 
 message("Performance metrics")
 
 perf_pre_l   <- get_metrics_boot(pre_xy$y,  pred_l_pre)   |> mutate(Model = "Pre-op LASSO")
 perf_pre_x   <- get_metrics_boot(pre_xy$y,  pred_x_pre)   |> mutate(Model = "Pre-op XGBoost")
-perf_post_l  <- get_metrics_boot(post_xy$y, pred_l_post)  |> mutate(Model = "Post-op LASSO")
-perf_post_x  <- get_metrics_boot(post_xy$y, pred_x_post)  |> mutate(Model = "Post-op XGBoost")
+perf_post_l  <- get_metrics_boot(post_xy$y, pred_l_post)  |> mutate(Model = "Intra-op LASSO")
+perf_post_x  <- get_metrics_boot(post_xy$y, pred_x_post)  |> mutate(Model = "Intra-op XGBoost")
 perf_core_l  <- get_metrics_boot(core_data_subset_clean$delirium_7d, pred_l_core) |> mutate(Model = "Core Model")
 
 perf_pre_l_val  <- get_metrics_boot(pre_xy_val$y,       pred_l_pre_val)  |> mutate(Model = "Pre-op LASSO")
 perf_pre_x_val  <- get_metrics_boot(pre_xy_val$y,       pred_x_pre_val)  |> mutate(Model = "Pre-op XGBoost")
-perf_post_l_val <- get_metrics_boot(post_xy_val$y,      pred_l_post_val) |> mutate(Model = "Post-op LASSO")
-perf_post_x_val <- get_metrics_boot(post_xy_val$y,      pred_x_post_val) |> mutate(Model = "Post-op XGBoost")
+perf_post_l_val <- get_metrics_boot(post_xy_val$y,      pred_l_post_val) |> mutate(Model = "Intra-op LASSO")
+perf_post_x_val <- get_metrics_boot(post_xy_val$y,      pred_x_post_val) |> mutate(Model = "Intra-op XGBoost")
 perf_core_l_val <- get_metrics_boot(core_val_clean$delirium_7d, pred_l_core_val) |> mutate(Model = "Core Model")
 
 #  7. OPTIMISM CORRECTION 
 message("Optimism-corrected AUC")
 
-opt_pre_l  <- get_optimism_corrected_auc(pre_data,  "lasso")
-opt_pre_x  <- get_optimism_corrected_auc(pre_data,  "xgb", n_boot = 200)
-opt_post_l <- get_optimism_corrected_auc(post_data, "lasso")
-opt_post_x <- get_optimism_corrected_auc(post_data, "xgb", n_boot = 200)
+opt_pre_l  <- get_optimism_corrected_auc_stab(pre_X,  pre_xy$y,  m_l_pre_stab,  stab_pre$stable_vars)
+opt_pre_x  <- get_optimism_corrected_auc_xgb(pre_data,  pre_X,  pre_xy$y,  m_x_pre)
+opt_post_l <- get_optimism_corrected_auc_stab(post_X, post_xy$y, m_l_post_stab, stab_post$stable_vars)
+opt_post_x <- get_optimism_corrected_auc_xgb(post_data, post_X, post_xy$y, m_x_post)
 opt_core_l <- get_optimism_corrected_auc_glm(core_data_subset_clean)
+
+internal_validation <- bind_rows(
+  opt_core_l |> mutate(Model = "Core Model"),
+  opt_pre_l  |> mutate(Model = "Pre-op LASSO"),
+  opt_pre_x  |> mutate(Model = "Pre-op XGBoost"),
+  opt_post_l |> mutate(Model = "Intra-op LASSO"),
+  opt_post_x |> mutate(Model = "Intra-op XGBoost")
+)
+print(internal_validation)
 
 # ---- 8. PERFORMANCE TABLE (LOCO-FREE VERSION) ----
 message("=== Generating final performance table ===")
 
 # 1. Compile optimism lookup for the machine learning models
 opt_lookup <- tibble(
-  Model = c("Pre-op LASSO", "Pre-op XGBoost", "Post-op LASSO", "Post-op XGBoost"),
+  Model = c("Pre-op LASSO", "Pre-op XGBoost", "Intra-op LASSO", "Intra-op XGBoost"),
   Optimism_Corrected_AUC = c(
     opt_pre_l$Optimism_Corrected_AUC, opt_pre_x$Optimism_Corrected_AUC,
     opt_post_l$Optimism_Corrected_AUC, opt_post_x$Optimism_Corrected_AUC
@@ -507,8 +583,8 @@ p_cal_all <- (
   make_cal_plot(pre_xy_val$y,  pred_x_pre_val,  "Pre-op XGBoost") +
   plot_spacer()
 ) / (
-  make_cal_plot(post_xy_val$y,      pred_l_post_val, "Post-op LASSO")   +
-  make_cal_plot(post_xy_val$y,      pred_x_post_val, "Post-op XGBoost") +
+  make_cal_plot(post_xy_val$y,      pred_l_post_val, "Intra-op LASSO")   +
+  make_cal_plot(post_xy_val$y,      pred_x_post_val, "Intra-op XGBoost") +
   make_cal_plot(core_val_clean$delirium_7d, pred_l_core_val, "Core Model")
 ) + plot_annotation(
   title    = "Calibration: Independent External Validation (LOESS)",
@@ -529,15 +605,15 @@ p_roc_internal <- pROC::ggroc(list(
   "Core Model"        = m_l_core_roc,
   "LASSO (Pre-op)"    = m_l_pre_roc,
   "XGBoost (Pre-op)"  = m_x_pre_roc,
-  "LASSO (Post-op)"   = m_l_post_roc,
-  "XGBoost (Post-op)" = m_x_post_roc
+  "LASSO (Intra-op)"   = m_l_post_roc,
+  "XGBoost (Intra-op)" = m_x_post_roc
 ), linewidth = 1.2) +
   scale_color_manual(values = c(
     "Core Model"        = "#1b9e77",
     "LASSO (Pre-op)"    = "#d95f02",
     "XGBoost (Pre-op)"  = "#e7298a",
-    "LASSO (Post-op)"   = "#7570b3",
-    "XGBoost (Post-op)" = "#377eb8"
+    "LASSO (Intra-op)"   = "#7570b3",
+    "XGBoost (Intra-op)" = "#377eb8"
   )) +
   geom_abline(slope = 1, intercept = 1, linetype = "dashed", alpha = 0.4) +
   theme_minimal() +
@@ -570,8 +646,8 @@ dca_result <- dcurves::dca(
   label = list(
     prob_lasso_pre  = "Full LASSO (Pre-op)",
     prob_xgb_pre    = "XGBoost (Pre-op)",
-    prob_lasso_post = "Full LASSO (Post-op)",
-    prob_xgb_post   = "XGBoost (Post-op)",
+    prob_lasso_post = "Full LASSO (Intra-op)",
+    prob_xgb_post   = "XGBoost (Intra-op)",
     prob_core       = "Core Model"
   )
 )
@@ -581,8 +657,8 @@ p_dca_final <- plot(dca_result, smooth = TRUE) +
   scale_color_manual(values = c(
     "Full LASSO (Pre-op)"  = "#d95f02",
     "XGBoost (Pre-op)"     = "#e7298a",
-    "Full LASSO (Post-op)" = "#7570b3",
-    "XGBoost (Post-op)"    = "#377eb8",
+    "Full LASSO (Intra-op)" = "#7570b3",
+    "XGBoost (Intra-op)"    = "#377eb8",
     "Core Model"           = "#1b9e77",
     "All"                  = "black",
     "None"                 = "gray70"
@@ -599,43 +675,29 @@ print(p_dca_final)
 # 13. COEFFICIENTS 
 message("Extracting coefficients...")
 
-# 1. Extract raw bootstrap data frames
-raw_boot_pre  <- extract_lasso_coefs(m_l_pre,  pre_X,  pre_xy$y)
-raw_boot_post <- extract_lasso_coefs(m_l_post, post_X, post_xy$y)
+# 1. Summarise pre-operative LASSO Model (stability-selected variables, unpenalised refit)
+pre_glm_tidy  <- broom::tidy(m_l_pre_stab, conf.int = TRUE, exponentiate = FALSE)
+pre_intercept <- pre_glm_tidy |> filter(term == "(Intercept)") |> pull(estimate)
 
-# 2. Summarise pre-operative LASSO Model
-orig_matrix_pre <- as.matrix(coef(m_l_pre, s = "lambda.min"))
-coefs_pre <- tibble(
-  Predictor = rownames(orig_matrix_pre),
-  Beta      = orig_matrix_pre[, 1]
-) |>
-  filter(Predictor != "(Intercept)") |>
-  filter(Beta != 0) |> 
-  mutate(
-    OR  = exp(Beta),
-    LCI = map_dbl(Predictor, ~ exp(quantile(raw_boot_pre[[.x]], 0.025, na.rm = TRUE))),
-    UCI = map_dbl(Predictor, ~ exp(quantile(raw_boot_pre[[.x]], 0.975, na.rm = TRUE)))
-  ) |>
+coefs_pre <- pre_glm_tidy |>
+  filter(term != "(Intercept)") |>
+  mutate(OR = exp(estimate), LCI = exp(conf.low), UCI = exp(conf.high)) |>
+  rename(Predictor = term, Beta = estimate) |>
   select(Predictor, Beta, OR, LCI, UCI) |>
   arrange(desc(abs(Beta)))
 
-# 3. Summarise post-operative LASSO Model
-orig_matrix_post <- as.matrix(coef(m_l_post, s = "lambda.min"))
-coefs_post <- tibble(
-  Predictor = rownames(orig_matrix_post),
-  Beta      = orig_matrix_post[, 1]
-) |>
-  filter(Predictor != "(Intercept)") |>
-  filter(Beta != 0) |> 
-  mutate(
-    OR  = exp(Beta),
-    LCI = map_dbl(Predictor, ~ exp(quantile(raw_boot_post[[.x]], 0.025, na.rm = TRUE))),
-    UCI = map_dbl(Predictor, ~ exp(quantile(raw_boot_post[[.x]], 0.975, na.rm = TRUE)))
-  ) |>
+# 2. Summarise intraoperative LASSO Model (stability-selected variables, unpenalised refit)
+post_glm_tidy  <- broom::tidy(m_l_post_stab, conf.int = TRUE, exponentiate = FALSE)
+post_intercept <- post_glm_tidy |> filter(term == "(Intercept)") |> pull(estimate)
+
+coefs_post <- post_glm_tidy |>
+  filter(term != "(Intercept)") |>
+  mutate(OR = exp(estimate), LCI = exp(conf.low), UCI = exp(conf.high)) |>
+  rename(Predictor = term, Beta = estimate) |>
   select(Predictor, Beta, OR, LCI, UCI) |>
   arrange(desc(abs(Beta)))
 
-# 4. Summarise GLM
+# 3. Summarise GLM
 core_glm_tidy <- broom::tidy(m_l_core, conf.int = TRUE, exponentiate = FALSE)
 core_intercept <- core_glm_tidy |> filter(term == "(Intercept)") |> pull(estimate)
 
@@ -666,7 +728,12 @@ sophisticated_results <- list(
   xgb_importance_pre = importance_pre, xgb_importance_post = importance_post,
   dca_df = dca_df, final_performance_table = final_performance_table,
   coefs_pre = coefs_pre, coefs_post = coefs_post, coefs_core = coefs_core,
-  core_intercept = core_intercept, m_l_core = m_l_core
+  core_intercept = core_intercept, pre_intercept = pre_intercept,
+  post_intercept = post_intercept, m_l_core = m_l_core,
+  stab_freq_pre = stab_pre$freq, stab_freq_post = stab_post$freq,
+  internal_validation = internal_validation,
+  boot_var_sets_pre = attr(opt_pre_l, "var_sets"), boot_var_sets_post = attr(opt_post_l, "var_sets"),
+  core_deriv_data = core_data_subset_clean, core_val_data = core_val_clean
 )
 
 save(sophisticated_results, file = here("data_interim", "sophisticated_results.RData"))
@@ -674,27 +741,15 @@ message("Success: sophisticated_results.RData saved.")
 NoSleepR::nosleep_off()
 
 
-# Sample size calculation
+# Sample size calculation (Riley et al., BMJ 2020). A priori anticipated Nagelkerke R2 of
+# 0.15 (i.e. 15% of the maximum Cox-Snell R2), not the apparent R2 of the fitted model.
 library(pmsampsize)
-
-ll_full <- as.numeric(logLik(m_l_core))
 
 y  <- as.integer(as.character(sophisticated_results$obs_core))
 p0 <- mean(y, na.rm = TRUE)
-n  <- length(y)
 
-ll_null <- sum(y * log(p0) + (1 - y) * log(1 - p0))
-
-cox_snell <- 1 - exp((ll_null - ll_full) * (2/n))
-
-r2_max <- 1 - exp(ll_null * (2/n))
-
-nagelkerke <- cox_snell / r2_max
-
-pmsampsize(
-  type        = "b",
-  prevalence  = p0,          
-  parameters  = 3,          
-  nagrsquared = nagelkerke,  
-  shrinkage   = 0.9
-)
+for (k in 3:5) {
+  ss <- pmsampsize(type = "b", prevalence = p0, parameters = k, nagrsquared = 0.15, shrinkage = 0.9)
+  message(sprintf("  -> %d parameters: n = %d (%d events) required; available n = %d (%d events)",
+                  k, ss$sample_size, ceiling(ss$sample_size * p0), length(y), sum(y)))
+}

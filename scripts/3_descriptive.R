@@ -176,8 +176,8 @@ c3 <- c3 %>%
 
 cohort_raw_descriptive <- c3
 
-winsorise_vec <- function(x, lower = 0.01, upper = 0.99) {
-  q <- quantile(x, probs = c(lower, upper), na.rm = TRUE)
+winsorise_vec <- function(x, ref = TRUE, lower = 0.01, upper = 0.99) {
+  q <- quantile(x[ref], probs = c(lower, upper), na.rm = TRUE)
   x[x < q[1]] <- q[1]
   x[x > q[2]] <- q[2]
   x
@@ -221,11 +221,12 @@ cohort_cleaned <- c3 %>%
   mutate(
     age_years = if_else(age_years < 40 | age_years > 110, NA_real_, age_years)
   ) %>%
-  mutate(across(any_of(c(lab_vars, "duration_hrs", "estimated_blood_loss", "bmi")), winsorise_vec)) %>%
+  mutate(across(any_of(c(lab_vars, "duration_hrs", "estimated_blood_loss", "bmi")),
+                ~winsorise_vec(.x, cohort_assignment == "Derivation"))) %>%
   mutate(
     urea_creat_ratio_t0 = (urea_t0 / creatinine_t0) * 1000
   ) %>%
-  mutate(across(any_of("urea_creat_ratio_t0"), winsorise_vec)) %>%
+  mutate(across(any_of("urea_creat_ratio_t0"), ~winsorise_vec(.x, cohort_assignment == "Derivation"))) %>%
   mutate(ph_missing_flag = factor(if_else(is.na(ph_t0), "Missing", "Measured")))
 
 cohort_cleaned_preimp <- cohort_cleaned

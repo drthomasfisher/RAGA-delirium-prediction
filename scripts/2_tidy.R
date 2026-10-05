@@ -334,7 +334,7 @@ drug_class <- function(x) {
                    "citicoline", "theophylline", "olaracetam", "chlorpromazine", "haloperidol", "Carbamazepine", "venlafaxine", "gabapentin", "oxcarbazepine") ~ "Psychotropic",
     
     # Benzodiazepines 
-    x_clean %in% c("clonazepam", "lorazepam", "oxazepam", "midazolam", "diazepam", "estazolam", "alprazolam", ) ~ "Psychotropic",
+    x_clean %in% c("clonazepam", "lorazepam", "oxazepam", "midazolam", "diazepam", "estazolam", "alprazolam") ~ "Psychotropic",
     
     # Local anaesthetics
     x_clean %in% c("lidocaine", "bupivacaine", "levobupivacaine", "ropivacaine") ~ "Anaesthetic",
@@ -498,9 +498,9 @@ repeated_bio_vars <- {block(data_translated, quote(
                 TRUE ~ as.numeric(preoperative_blood_oxygen_saturation)
                         ),
             hb_t0 = case_when(
-  as.numeric(no_1_hemoglobin) < 22  ~ as.numeric(no_1_hemoglobin) * 100,
-  as.numeric(no_1_hemoglobin) > 220 ~ as.numeric(no_1_hemoglobin) / 10,
-  TRUE                              ~ as.numeric(no_1_hemoglobin)
+  as.numeric(preoperative_hemoglobin) < 22  ~ as.numeric(preoperative_hemoglobin) * 100,
+  as.numeric(preoperative_hemoglobin) > 220 ~ as.numeric(preoperative_hemoglobin) / 10,
+  TRUE                              ~ as.numeric(preoperative_hemoglobin)
 ),
             albumin_t0    = as.numeric(preoperative_albumin),
             creatinine_t0 = as.numeric(preoperative_creatinine),
@@ -744,7 +744,7 @@ preop_features_vars <- {block(data_translated, quote(
             preop_char4 = factor(preoperative_characteristics_4),
             
             # Alternate baseline sets (duplicates / repeats) ---
-            preop_char2_2 = factor(preoperative_characteristics_1_2),
+            preop_char1_2 = factor(preoperative_characteristics_1_2),
             preop_char2_2 = factor(preoperative_characteristics_2_2),
             preop_char3_2 = factor(preoperative_characteristics_3_2),
             preop_char4_2 = factor(preoperative_characteristics_4_2),
@@ -1005,7 +1005,7 @@ periop_treatment_vars <- {data_translated_fixed_volatiles  |>
         str_detect(anesthesia_method_x, "(?i)general anesthesia") & has_volatile  ~ "Volatile_GA",
         str_detect(anesthesia_method_x, "(?i)general anesthesia") & !has_volatile ~ "TIVA_GA",
         str_detect(anesthesia_method_x, "(?i)local anesthesia")                   ~ "Regional",
-        TRUE ~ "Regional" 
+        TRUE ~ NA_character_
       ),
 
       # 2. Binary coding for LASSO
@@ -1305,12 +1305,12 @@ cognitive_vars <- {block(data_translated, quote(
             cog_pre_delirium_exists  = normalise_yes_no(before_surgery_whether_delirium_occurs),
             cog_pre_delirium_type    = delirium_type(preoperative_delirium_classification),
             
-            # 2. COMPOSITE DEMENTIA  ---
+            # 2. PRE-EXISTING DEMENTIA (baseline fields only) ---
+            # dementia_fo and dementia_alzm come from the follow-up assessment; including them
+            # flagged the 13 patients with newly diagnosed dementia after surgery as preoperative cases.
             cog_pre_dementia_flag = case_when(
               normalise_yes_no(is_there_cognitive_impairment_alzheimers_disease) == "TRUE" ~ "TRUE",
               normalise_yes_no(dementia_preop) == "TRUE" ~ "TRUE",
-              normalise_yes_no(dementia_alzm) == "TRUE"  ~ "TRUE",
-              normalise_yes_no(dementia_fo) == "TRUE"    ~ "TRUE", 
               TRUE ~ "FALSE"
             ),
             

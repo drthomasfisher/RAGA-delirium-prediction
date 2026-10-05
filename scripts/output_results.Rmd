@@ -35,6 +35,18 @@ load(here("data_interim", "model_cohorts.RData"))
 load(here("data_interim", "results_descriptive.RData"))
 load(here("data_interim", "sophisticated_results.RData"))
 load(here("data_interim", "recalibration_results.RData"))
+load(here("data_interim", "validation_results.RData"))
+
+fmt_ci <- function(est, lo, hi, digits = 2, sep = " ") {
+  f <- paste0("%.", digits, "f")
+  dash <- if_else(lo < 0 | hi < 0, " to ", "–")
+  paste0(sprintf(f, est), sep, "(", sprintf(f, lo), dash, sprintf(f, hi), ")")
+}
+
+# Fixed column widths (inches) so long cells and footnotes wrap instead of shrinking the font
+fixed_widths <- function(ft, widths) {
+  ft |> width(width = widths) |> set_table_properties(layout = "fixed")
+}
 
 # Define cohort_full dynamically if missing
 if (!exists("cohort_full") && exists("cohort_raw_unimputed")) {
@@ -87,7 +99,7 @@ var_labels <- c(
   cns                    = "CNS/neurological disease",
   urinary_tract          = "Urinary tract disease",
   cog_mmse_pre           = "MMSE score (pre-operative)",
-  cog_pre_dementia_flag  = "Dementia diagnosis",
+  cog_pre_dementia_flag  = "Pre-existing dementia",
   temp_t0                = "Temperature, °C",
   sysbp_t0               = "Systolic blood pressure, mmHg",
   diabp_t0               = "Diastolic blood pressure, mmHg",
@@ -155,7 +167,7 @@ label_vars <- function(x) {
 # Main figures
 ## Figure 1: Patient Flow Diagram - manually drawn
 
-## Figure 2: Calibration Properties (Recalibrated)
+## Supplementary Figure 4: Calibration of the models as developed (validation cohort)
 ```{r calibration_curves_main, fig.height=8, fig.width=12}
 
 make_cal_plot_val <- function(obs, pred, title) {
@@ -179,62 +191,55 @@ make_cal_plot_val <- function(obs, pred, title) {
     theme(aspect.ratio = 1)
 }
 
+y_val <- as.integer(res$obs_core_val)
+
 fig2_plot <- (
-  make_cal_plot_val(rc$pre_lasso_obs,  rc$pre_lasso_recal,  "Pre-op LASSO")    +
-  make_cal_plot_val(rc$pre_xgb_obs,    rc$pre_xgb_recal,    "Pre-op XGBoost") +
-  plot_spacer()
+  make_cal_plot_val(y_val, res$pred_l_core_val,     "Primary Model")  +
+  make_cal_plot_val(y_val, res$pred_lasso_pre_val,  "Pre-op LASSO")   +
+  make_cal_plot_val(y_val, res$pred_xgb_pre_val,    "Pre-op XGBoost")
 ) / (
-  make_cal_plot_val(rc$post_lasso_obs, rc$post_lasso_recal, "Post-op LASSO")    +
-  make_cal_plot_val(rc$post_xgb_obs,   rc$post_xgb_recal,   "Post-op XGBoost") +
-  make_cal_plot_val(rc$core_obs,       rc$core_recal,       "Parsimonious Model")
-) +
-  plot_annotation(
-    title = "Calibration properties following validation cohort logistic recalibration",
-    theme = theme(plot.title = element_text(family = "serif", face = "bold", size = 10))
-  )
+  make_cal_plot_val(y_val, res$pred_lasso_post_val, "Intra-op LASSO")   +
+  make_cal_plot_val(y_val, res$pred_xgb_post_val,   "Intra-op XGBoost") +
+  plot_spacer()
+)
 
 fig2_plot
 
-ggsave(here("outputs", "figures", "main", "figure2_calibration_recalibrated.svg"), plot = fig2_plot,
+ggsave(here("outputs", "figures", "supplementary", "figureS4_calibration_as_developed.svg"), plot = fig2_plot,
        width = 180, height = 120, units = "mm", device = "svg")
-ggsave(here("outputs", "figures", "main", "figure2_calibration_recalibrated.png"), plot = fig2_plot,
+ggsave(here("outputs", "figures", "supplementary", "figureS4_calibration_as_developed.png"), plot = fig2_plot,
        width = 180, height = 120, units = "mm", dpi = 300)
 ```
 
-## Figure 3: Decision Curve Analysis (Recalibrated)
-```{r DCA, fig.height=6, fig.width=8}
-load(here::here("data_interim", "recalibration_results.RData"))
-
-dca_result_rmd <- dcurves::dca(
-  delirium_n ~ prob_core + prob_lasso_pre + prob_xgb_pre + prob_lasso_post + prob_xgb_post,
-  data       = dca_recal_df,
-  thresholds = seq(0, 0.40, by = 0.01),
-  label = list(
-    prob_core       = "Parsimonious Model",
-    prob_lasso_pre  = "LASSO (Pre-op)",
-    prob_xgb_pre    = "XGBoost (Pre-op)",
-    prob_lasso_post = "LASSO (Post-op)",
-    prob_xgb_post   = "XGBoost (Post-op)"
-  )
+## Figure 3: Decision Curve Analysis (models as developed, and after cross-validated recalibration)
+```{r DCA, fig.height=6, fig.width=10}
+dca_colours <- c(
+  "Primary Model"    = "#1b9e77",
+  "Pre-op LASSO"     = "#d95f02",
+  "Pre-op XGBoost"   = "#e7298a",
+  "Intra-op LASSO"   = "#7570b3",
+  "Intra-op XGBoost" = "#377eb8",
+  "Treat all"        = "black",
+  "Treat none"       = "gray70"
 )
 
-fig3_plot <- plot(dca_result_rmd, smooth = TRUE) +
+fig3_plot <- dca_curves |>
+  mutate(
+    Model = factor(Model, levels = names(dca_colours)),
+    Predictions = factor(Predictions,
+                         levels = c("Original", "Recalibrated (cross-validated)"),
+                         labels = c("A. Models as developed", "B. After cross-validated recalibration"))
+  ) |>
+  ggplot(aes(x = threshold, y = net_benefit, colour = Model)) +
+  geom_line(linewidth = 0.7) +
+  facet_wrap(~ Predictions) +
+  scale_colour_manual(values = dca_colours) +
+  coord_cartesian(ylim = c(-0.02, 0.09), xlim = c(0, 0.25)) +
   theme_classic(base_family = "serif") +
-  scale_color_manual(values = c(
-    "Parsimonious Model" = "#1b9e77",
-    "LASSO (Pre-op)"   = "#d95f02",
-    "XGBoost (Pre-op)" = "#e7298a",
-    "LASSO (Post-op)"  = "#7570b3",
-    "XGBoost (Post-op)"= "#377eb8",
-    "All"              = "black",
-    "None"             = "gray70"
-  )) +
-  coord_cartesian(ylim = c(-0.02, 0.07), xlim = c(0, 0.25)) +
   labs(
-    title = "Recalibrated Decision Curve Analysis",
-    x     = "Threshold Probability (Risk of Delirium)",
-    y     = "Net Benefit",
-    color = "Model Strategy"
+    x      = "Threshold Probability (Risk of Delirium)",
+    y      = "Net Benefit",
+    colour = NULL
   ) +
   theme(
     legend.position = "bottom",
@@ -246,15 +251,17 @@ fig3_plot <- plot(dca_result_rmd, smooth = TRUE) +
     axis.text = element_text(size = 9),
     legend.title = element_text(size = 10),
     legend.text = element_text(size = 9),
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold", size = 10, hjust = 0),
     plot.margin = margin(t = 5, r = 10, b = 30, l = 5)  # Increased bottom margin for legend
   )
 
 fig3_plot
 
-ggsave(here("outputs", "figures", "main", "figure3_DCA_recalibrated.svg"), plot = fig3_plot,
-       width = 220, height = 160, units = "mm", device = "svg")
-ggsave(here("outputs", "figures", "main", "figure3_DCA_recalibrated.png"), plot = fig3_plot,
-       width = 220, height = 160, units = "mm", dpi = 300)
+ggsave(here("outputs", "figures", "main", "figure3_DCA_validation.svg"), plot = fig3_plot,
+       width = 220, height = 130, units = "mm", device = "svg")
+ggsave(here("outputs", "figures", "main", "figure3_DCA_validation.png"), plot = fig3_plot,
+       width = 220, height = 130, units = "mm", dpi = 300)
 ```
 
 # Main tables
@@ -281,114 +288,90 @@ build_table1_v4 <- function(df) {
       urinary_tract         = as.integer(as.integer(urinary_tract)  == 1L)
     )
 
-  # Continuous helper
-  mean_sd <- function(v, cohort, del) {
-    d <- df_clean |> filter(cohort_assignment == cohort, delirium_7d == del)
-    if (nrow(d) == 0) return("—")
-    sprintf("%.1f (%.1f)", mean(d[[v]], na.rm=TRUE), sd(d[[v]], na.rm=TRUE))
+  # Six columns: each cohort in full, then split by delirium (del = NA means all patients)
+  groups <- list(Deriv_All = c("Derivation", NA), Deriv_Del = c("Derivation", 1), Deriv_NoDel = c("Derivation", 0),
+                 Val_All = c("Validation", NA),   Val_Del = c("Validation", 1),   Val_NoDel = c("Validation", 0))
+  subset_of <- function(g) {
+    d <- df_clean |> filter(cohort_assignment == g[1])
+    if (!is.na(g[2])) d <- d |> filter(delirium_7d == as.integer(g[2]))
+    d
   }
+  mean_sd <- function(d, v) sprintf("%.1f (%.1f)", mean(d[[v]], na.rm = TRUE), sd(d[[v]], na.rm = TRUE))
+  pct     <- function(d, v) { n <- sum(d[[v]], na.rm = TRUE); sprintf("%d (%.1f%%)", n, 100 * n / sum(!is.na(d[[v]]))) }
+  cat_pct <- function(d, v, lvl) { n <- sum(d[[v]] == lvl, na.rm = TRUE); sprintf("%d (%.1f%%)", n, 100 * n / sum(!is.na(d[[v]]))) }
 
-  # Binary helper
-  pct <- function(v, cohort, del) {
-    d <- df_clean |> filter(cohort_assignment == cohort, delirium_7d == del)
-    if (nrow(d) == 0) return("0 (0.0%)")
-    n_pos <- sum(d[[v]], na.rm = TRUE)
-    n_tot <- sum(!is.na(d[[v]]))
-    sprintf("%d (%.1f%%)", n_pos, 100 * n_pos / n_tot)
+  row <- function(label, f, ...) {
+    as_tibble(c(list(Variable = label), lapply(groups, function(g) f(subset_of(g), ...))))
   }
-
-  # Categorical helper
-  cat_pct <- function(v, lvl, cohort, del) {
-    d <- df_clean |> filter(cohort_assignment == cohort, delirium_7d == del)
-    if (nrow(d) == 0) return("0 (0.0%)")
-    n_lvl <- sum(d[[v]] == lvl, na.rm = TRUE)
-    n_tot <- sum(!is.na(d[[v]]))
-    sprintf("%d (%.1f%%)", n_lvl, 100 * n_lvl / n_tot)
-  }
-
-  row  <- function(var, d_del, d_nodel, v_del, v_nodel) {
-    tibble(
-      Variable    = var, 
-      Deriv_Del   = d_del, 
-      Deriv_NoDel = d_nodel, 
-      Val_Del     = v_del, 
-      Val_NoDel   = v_nodel
-    )
-  }
-  hdr  <- function(var) {
-    tibble(Variable = var, Deriv_Del = "", Deriv_NoDel = "", Val_Del = "", Val_NoDel = "")
-  }
+  hdr <- function(label) as_tibble(c(list(Variable = label), lapply(groups, function(g) "")))
 
   bind_rows(
-    row("Age (years)",               mean_sd("age_years","Derivation", 1),      mean_sd("age_years","Derivation", 0),      mean_sd("age_years","Validation", 1),      mean_sd("age_years","Validation", 0)),
-    row("Female sex",                pct("sex","Derivation", 1),                pct("sex","Derivation", 0),                pct("sex","Validation", 1),                pct("sex","Validation", 0)),
-    row("BMI (kg/m\u00b2)",          mean_sd("bmi","Derivation", 1),            mean_sd("bmi","Derivation", 0),            mean_sd("bmi","Validation", 1),            mean_sd("bmi","Validation", 0)),
-    row("MMSE score",                mean_sd("cog_mmse_pre","Derivation", 1),   mean_sd("cog_mmse_pre","Derivation", 0),   mean_sd("cog_mmse_pre","Validation", 1),   mean_sd("cog_mmse_pre","Validation", 0)),
-
+    row("Age (years)",               mean_sd, "age_years"),
+    row("Female sex",                pct,     "sex"),
+    row("BMI (kg/m²)",          mean_sd, "bmi"),
+    row("MMSE score",                mean_sd, "cog_mmse_pre"),
+    row("Urea (mmol/L)",             mean_sd, "urea_t0"),
+    row("Surgical duration (hours)", mean_sd, "duration_hrs"),
     hdr("ASA status"),
-    purrr::map_dfr(levels(df_clean$asa_status), \(lvl)
-      row(paste0("   ", lvl),
-          cat_pct("asa_status", lvl, "Derivation", 1),
-          cat_pct("asa_status", lvl, "Derivation", 0),
-          cat_pct("asa_status", lvl, "Validation", 1),
-          cat_pct("asa_status", lvl, "Validation", 0))),
-
+    purrr::map_dfr(levels(df_clean$asa_status), \(lvl) row(paste0("   ", lvl), cat_pct, "asa_status", lvl)),
     hdr("Fracture type"),
-    purrr::map_dfr(levels(df_clean$fracture_type), \(lvl)
-      row(paste0("   ", lvl),
-          cat_pct("fracture_type", lvl, "Derivation", 1),
-          cat_pct("fracture_type", lvl, "Derivation", 0),
-          cat_pct("fracture_type", lvl, "Validation", 1),
-          cat_pct("fracture_type", lvl, "Validation", 0))),
-
+    purrr::map_dfr(levels(df_clean$fracture_type), \(lvl) row(paste0("   ", lvl), cat_pct, "fracture_type", lvl)),
     hdr("Comorbidities"),
-    row("   Dementia",               pct("cog_pre_dementia_flag","Derivation", 1), pct("cog_pre_dementia_flag","Derivation", 0), pct("cog_pre_dementia_flag","Validation", 1), pct("cog_pre_dementia_flag","Validation", 0)),
-    row("   Cardiovascular disease", pct("cardiovascular","Derivation", 1),     pct("cardiovascular","Derivation", 0),     pct("cardiovascular","Validation", 1),     pct("cardiovascular","Validation", 0)),
-    row("   Respiratory disease",    pct("respiratory","Derivation", 1),        pct("respiratory","Derivation", 0),        pct("respiratory","Validation", 1),        pct("respiratory","Validation", 0)),
-    row("   CNS disease",            pct("cns","Derivation", 1),                pct("cns","Derivation", 0),                pct("cns","Validation", 1),                pct("cns","Validation", 0)),
-    row("   Urinary tract disease",  pct("urinary_tract","Derivation", 1),      pct("urinary_tract","Derivation", 0),      pct("urinary_tract","Validation", 1),      pct("urinary_tract","Validation", 0))
+    row("   Pre-existing dementia",  pct, "cog_pre_dementia_flag"),
+    row("   Cardiovascular disease", pct, "cardiovascular"),
+    row("   Respiratory disease",    pct, "respiratory"),
+    row("   CNS disease",            pct, "cns"),
+    row("   Urinary tract disease",  pct, "urinary_tract")
   )
 }
 
 t1 <- build_table1_v4(cohort_full)
 
 # Dynamic counts
-n_deriv_del <- sum(cohort_full$cohort_assignment == "Derivation" & as.integer(as.character(cohort_full$delirium_7d)) == 1, na.rm=TRUE)
-n_deriv_no  <- sum(cohort_full$cohort_assignment == "Derivation" & as.integer(as.character(cohort_full$delirium_7d)) == 0, na.rm=TRUE)
-n_val_del   <- sum(cohort_full$cohort_assignment == "Validation" & as.integer(as.character(cohort_full$delirium_7d)) == 1, na.rm=TRUE)
-n_val_no    <- sum(cohort_full$cohort_assignment == "Validation" & as.integer(as.character(cohort_full$delirium_7d)) == 0, na.rm=TRUE)
+n_of <- function(cohort, del = NA) {
+  d <- cohort_full |> filter(cohort_assignment == cohort)
+  if (!is.na(del)) d <- d |> filter(as.integer(as.character(delirium_7d)) == del)
+  nrow(d)
+}
 
 # Divider positions
 header_rows <- which(t1$Variable %in% c(
-  "Age (years)", "Female sex", "BMI (kg/m\u00b2)", "MMSE score", "ASA status", "Fracture type", "Comorbidities"
+  "Age (years)", "Female sex", "BMI (kg/m²)", "MMSE score", "Urea (mmol/L)", "Surgical duration (hours)",
+  "ASA status", "Fracture type", "Comorbidities"
 ))
 divider_after <- header_rows[-1] - 1
 
 ft1 <- flextable(t1) |>
+  set_header_labels(
+    Variable    = "Characteristic",
+    Deriv_All   = paste0("All\n(n = ", n_of("Derivation"), ")"),
+    Deriv_Del   = paste0("Delirium\n(n = ", n_of("Derivation", 1), ")"),
+    Deriv_NoDel = paste0("No delirium\n(n = ", n_of("Derivation", 0), ")"),
+    Val_All     = paste0("All\n(n = ", n_of("Validation"), ")"),
+    Val_Del     = paste0("Delirium\n(n = ", n_of("Validation", 1), ")"),
+    Val_NoDel   = paste0("No delirium\n(n = ", n_of("Validation", 0), ")")
+  ) |>
+  add_header_row(values = c("", "Derivation cohort", "Validation cohort"), colwidths = c(1, 3, 3)) |>
   theme_booktabs() |>
   align(align = "center", part = "header") |>
   align(align = "left",   j = 1,   part = "body") |>
-  align(align = "center", j = 2:5, part = "body") |>
-  set_header_labels(
-    Variable    = "Characteristic",
-    Deriv_Del   = paste0("Derivation Cohort\nwith Delirium\n(n = ", n_deriv_del, ")"),
-    Deriv_NoDel = paste0("Derivation Cohort\nwithout Delirium\n(n = ", n_deriv_no, ")"),
-    Val_Del     = paste0("Validation Cohort\nwith Delirium\n(n = ", n_val_del, ")"),
-    Val_NoDel   = paste0("Validation Cohort\nwithout Delirium\n(n = ", n_val_no, ")")
-  ) |>
+  align(align = "center", j = 2:7, part = "body") |>
   bold(part = "header") |>
+  bold(j = c(2, 5), part = "body") |>
   bold(i = which(t1$Variable %in% c("ASA status", "Fracture type", "Comorbidities")),
        j = 1, part = "body") |>
   hline(i = divider_after,
         border = officer::fp_border(color = "#CCCCCC", width = 0.5),
         part = "body") |>
   add_footer_lines(values = c(
-    "Continuous variables reported as mean (SD); categorical and binary variables as n (%)."
+    paste0("Continuous variables reported as mean (SD) of observed values; categorical and binary variables as ",
+           "n (%). Missing data for each variable are shown in Supplementary Table S3.")
   )) |>
   italic(part = "footer") |>
-  fontsize(size = 9, part = "footer") |>
-  set_caption("Table 1. Demographic and clinical characteristics of derivation and validation cohorts stratified by delirium occurrence") |>
-  autofit()
+  font(fontname = "Arial", part = "all") |>
+  fontsize(size = 8, part = "all") |>
+  set_caption("Table 1. Demographic and clinical characteristics of the derivation and validation cohorts, overall and by delirium occurrence") |>
+  fixed_widths(c(1.62, rep(0.78, 6)))
 
 # Save Lancet-friendly versions
 flextable::save_as_docx(ft1, path = here("outputs", "tables", "main", "table1_cohort_overview.docx"))
@@ -401,28 +384,29 @@ prep_df <- function(df, model_name) {
   df |>
     mutate(
       Predictor = label_vars(Predictor),
-      !!model_name := sprintf("%.3f", OR),
+      !!model_name := sprintf("%.3f
+%.2f (%.2f–%.2f)", Beta, OR, LCI, UCI),
       Beta_val = abs(Beta)
     ) |>
     select(Predictor, !!model_name, Beta_val)
 }
 
-combined_coefs <- prep_df(res$coefs_core, "GLM (Core)") |>
-  full_join(prep_df(res$coefs_pre, "Pre-op (LASSO)"), by = "Predictor", suffix = c("_core", "_pre")) |>
-  full_join(prep_df(res$coefs_post, "Post-op (LASSO)"), by = "Predictor") |>
+combined_coefs <- prep_df(res$coefs_core, "Primary model") |>
+  full_join(prep_df(res$coefs_pre, "Pre-op LASSO"), by = "Predictor", suffix = c("_core", "_pre")) |>
+  full_join(prep_df(res$coefs_post, "Intra-op LASSO"), by = "Predictor") |>
   mutate(max_beta = pmax(Beta_val_core, Beta_val_pre, Beta_val, na.rm = TRUE)) |>
   arrange(desc(max_beta)) |>
-  select(Predictor, `GLM (Core)`, `Pre-op (LASSO)`, `Post-op (LASSO)`)
+  select(Predictor, `Primary model`, `Pre-op LASSO`, `Intra-op LASSO`)
 
 b0_core  <- res$core_intercept %||% -3.124
-b0_pre   <- -3.245 
-b0_post  <- -3.512 
+b0_pre   <- res$pre_intercept  %||% -3.245
+b0_post  <- res$post_intercept %||% -3.512
 
 intercept_row <- tibble(
   Predictor = "Intercept",
-  `GLM (Core)` = sprintf("%.3f", b0_core),
-  `Pre-op (LASSO)` = sprintf("%.3f", b0_pre),
-  `Post-op (LASSO)` = sprintf("%.3f", b0_post)
+  `Primary model`  = sprintf("%.3f", b0_core),
+  `Pre-op LASSO`   = sprintf("%.3f", b0_pre),
+  `Intra-op LASSO` = sprintf("%.3f", b0_post)
 )
 
 combined_coefs <- bind_rows(intercept_row, combined_coefs)
@@ -431,14 +415,21 @@ ft2 <- combined_coefs |>
   flextable() |>
   set_header_labels(Predictor = "Predictor") |>
   add_header_row(
-    values = c("", "Model Formulations (Odds Ratios / Constants)"),
+    values = c("", "β coefficient; odds ratio (95% CI)"),
     colwidths = c(1, 3)
   ) |>
   theme_booktabs() |>
   colformat_char(na_str = "—") |>
-  add_footer_lines("OR = odds ratio. Intercept values are reported as log-odds constants. Coefficients ordered by descending absolute beta magnitude. Coefficients are rounded to three decimal points.") |>
+  align(align = "center", j = 2:4, part = "all") |>
+  add_footer_lines(paste0(
+    "Each cell shows the log-odds β coefficient (first line) and the corresponding odds ratio with 95% CI (second line). ",
+    "The linear predictor z (P = 1/[1+exp(−z)]) is the intercept plus the sum of each retained predictor's β ",
+    "multiplied by its value; intercept rows show the log-odds constant only. For the LASSO models, coefficients and CIs ",
+    "come from an unpenalised refit of the stability-selected predictors and do not account for the selection step, so ",
+    "the CIs are too narrow. Predictors are ordered by descending absolute β; coefficients rounded to three decimal places."
+  )) |>
   set_caption("Table 2. Predictors included in the final prediction models") |>
-  autofit()
+  fixed_widths(c(2.1, 1.4, 1.4, 1.4))
 
 # Save Lancet-friendly versions
 flextable::save_as_docx(ft2, path = here("outputs", "tables", "main", "table2_model_coefficients.docx"))
@@ -447,96 +438,71 @@ ft2
 
 ## Table 3: Model performance
 ```{r model_performance_comparison}
-get_cal_stats_val <- function(obs, pred, model_name) {
-  keep <- !is.na(obs) & !is.na(pred)
-  obs  <- obs[keep]
-  pred <- pred[keep]
-  
-  if (max(pred, na.rm = TRUE) > 1.0 || min(pred, na.rm = TRUE) < 0.0) {
-    pred <- plogis(pred)
-  }
-  
-  pred_adj <- pmin(pmax(pred, 0.001), 0.999)
-  logit_p  <- qlogis(pred_adj)
-  
-  m_raw     <- glm(obs ~ logit_p, family = "binomial")
-  raw_int   <- coef(m_raw)[1]
-  raw_slope <- coef(m_raw)[2]
-  brier_raw <- mean((obs - pred)^2)
-  
-  pred_recal  <- predict(m_raw, type = "response")
-  brier_recal <- mean((obs - pred_recal)^2)
-  
-  tibble(
-    Model                = model_name,
-    `Raw Val Intercept`  = raw_int, 
-    `Raw Val Slope`      = raw_slope,
-    `Raw Brier`          = brier_raw,
-    `Recalibrated Brier` = brier_recal
-  )
-}
+model_order <- c("Primary Model", "Pre-op LASSO", "Pre-op XGBoost", "Intra-op LASSO", "Intra-op XGBoost")
 
-cal_stats_val <- bind_rows(
-  get_cal_stats_val(res$obs_core_val, res$pred_l_core_val,     "Parsimonious Model"),
-  get_cal_stats_val(res$obs_pre_val,  res$pred_lasso_pre_val,  "Pre-op LASSO"),
-  get_cal_stats_val(res$obs_pre_val,  res$pred_xgb_pre_val,     "Pre-op XGBoost"),
-  get_cal_stats_val(res$obs_post_val, res$pred_lasso_post_val, "Post-op LASSO"),
-  get_cal_stats_val(res$obs_post_val, res$pred_xgb_post_val,   "Post-op XGBoost")
+internal_val <- res$internal_validation |>
+  mutate(Model = if_else(Model == "Core Model", "Primary Model", Model))
+
+# XGBoost predictions are already compressed in the derivation data (apparent slope well above 1),
+# so a bootstrap-corrected slope is not interpretable for them; show the apparent slope instead.
+deriv_slope <- function(obs, p) {
+  lp <- qlogis(pmin(pmax(p, 1e-4), 1 - 1e-4))
+  unname(coef(glm(as.integer(as.character(obs)) ~ lp, family = "binomial"))[2])
+}
+xgb_apparent_slope <- c(
+  "Pre-op XGBoost"   = deriv_slope(res$obs_pre,  res$pred_xgb_pre),
+  "Intra-op XGBoost" = deriv_slope(res$obs_post, res$pred_xgb_post)
 )
 
-# Render formatted table layout
-final_table_formatted <- res$final_performance_table |>
-  # REMOVE CIs: This regex looks for a space and everything inside parentheses
-  mutate(across(c(`Derivation Apparent AUC`, 
-                  `Derivation Corrected (Internal)`, 
-                  `Validation External AUC`), 
-                ~ stringr::str_remove(.x, "\\s*\\(.*\\)"))) |>
-  # Rename programmatic columns from AUC to AUROC
-  rename(
-    `Derivation Apparent AUROC` = `Derivation Apparent AUC`,
-    `Validation External AUROC` = `Validation External AUC`
-  ) |>
-  rename_with(~ "Derivation Corrected AUROC (Internal)", contains("Corrected")) |>
-  mutate(Model = case_when(Model == "GLM Model" ~ "Parsimonious Model",
-                           Model == "Core Model" ~ "Parsimonious Model",
-                           TRUE ~ Model)) |>
-  select(-any_of("LOCO AUC (Internal)")) |> # LOCO removed
-  left_join(cal_stats_val, by = "Model") |>
-  mutate(
-    `Raw Val Intercept`  = sprintf("%.2f", as.numeric(`Raw Val Intercept`)),
-    `Raw Val Slope`      = sprintf("%.2f", as.numeric(`Raw Val Slope`)),
-    `Raw Brier`          = sprintf("%.3f", as.numeric(`Raw Brier`)),
-    `Recalibrated Brier` = sprintf("%.3f", as.numeric(`Recalibrated Brier`))
-  ) |>
-  select(
-    Model, 
-    `Derivation Apparent AUROC`, 
-    `Derivation Corrected AUROC (Internal)`, 
-    `Validation External AUROC`, 
-    `Raw Brier`,
-    `Raw Val Intercept`, 
-    `Raw Val Slope`,
-    `Recalibrated Brier`
-  ) |>
-  arrange(desc(Model == "Parsimonious Model"))
+table3_data <- internal_val |>
+  select(Model, Apparent_AUC, Optimism_Corrected_AUC, Corrected_Slope) |>
+  left_join(val_metrics, by = "Model") |>
+  mutate(Model = factor(Model, levels = model_order)) |>
+  arrange(Model) |>
+  transmute(
+    Model             = as.character(Model),
+    `Apparent AUROC`  = sprintf("%.3f", Apparent_AUC),
+    `Corrected AUROC` = sprintf("%.3f", Optimism_Corrected_AUC),
+    `Corrected slope` = if_else(Model %in% names(xgb_apparent_slope),
+                                sprintf("%.2f*", xgb_apparent_slope[Model]),
+                                sprintf("%.2f", Corrected_Slope)),
+    `AUROC (95% CI)` = fmt_ci(AUC, AUC_LCI, AUC_UCI, 3, "
+"),
+    `CITL (95% CI)`  = fmt_ci(CITL, CITL_LCI, CITL_UCI, 2, "
+"),
+    `Slope (95% CI)` = fmt_ci(Slope, Slope_LCI, Slope_UCI, 2, "
+")
+  )
 
-# Render formatted table layout
-ft3 <- final_table_formatted |>
+ft3 <- table3_data |>
   flextable() |>
   theme_booktabs() |>
   add_header_row(
-    values = c("", "Internal Discrimination", "External Validation (Baseline / Raw)", "Post-Recalibration"),
-    colwidths = c(1, 2, 4, 1)
+    values = c("", "Internal validation (derivation cohort)", "Validation cohort (models as developed)"),
+    colwidths = c(1, 3, 3)
   ) |>
   bold(part = "header") |>
   font(fontname = "Arial", part = "all") |>
-  fontsize(size = 9, part = "all") |>
+  fontsize(size = 8, part = "all") |>
   align(align = "center", part = "header") |>
-  align(align = "center", j = 2:8, part = "body") |>
-  hline(i = 1, border = officer::fp_border(width = 1.2, color = "black")) |> 
-  set_caption("Table 3. Model discrimination and calibration in derivation and external validation cohorts") |>
-  add_footer_lines("Optimism-corrected AUROC was estimated using bootstrap validation. Validation intercept and slope assess calibration in the external cohort before logistic recalibration.") |>
-  autofit()
+  align(align = "center", j = 2:7, part = "body") |>
+  valign(valign = "center", part = "body") |>
+  hline(i = 1, border = officer::fp_border(width = 1.2, color = "black")) |>
+  set_caption("Table 3. Model discrimination and calibration in the derivation and validation cohorts") |>
+  add_footer_lines(paste0(
+    "AUROC = area under the receiver operating characteristic curve. CITL = calibration-in-the-large ",
+    "(intercept of a logistic model with the model's linear predictor as an offset; 0 is ideal, positive values ",
+    "indicate under-prediction). Slope = calibration slope (1 is ideal). Optimism correction used Harrell's bootstrap ",
+    "with every modelling step repeated in each replicate: 1000 replicates for the primary model, 200 for the LASSO ",
+    "models (including stability selection) and 1000 for XGBoost (including tuning of the number of boosting rounds). ",
+    "The corrected slope is the bootstrap estimate of the calibration slope expected in new data. ",
+    "*Apparent calibration slope in the derivation cohort: XGBoost predictions were compressed towards the average ",
+    "risk even in the data used to fit them, so a bootstrap-corrected slope is not interpretable. ",
+    "Validation metrics use each model's original predictions without recalibration; 95% CIs for AUROC by ",
+    "DeLong's method and Wald 95% CIs for calibration measures."
+  )) |>
+  fontsize(size = 7.5, part = "footer") |>
+  fixed_widths(c(1.1, 0.75, 0.75, 0.75, 1.05, 0.95, 0.95))
 
 # Save Lancet-friendly versions
 flextable::save_as_docx(ft3, path = here("outputs", "tables", "main", "table3_model_performance.docx"))
@@ -595,7 +561,7 @@ terms_core_stacked <- purrr::map2_chr(
     sprintf("  & %s %.3f \\times \\text{%s} \\\\", sign_str, abs(beta), label)
   }
 )
-cat("Parsimonious Model:")
+cat("Primary Model:")
 cat("$$P(\\text{Delirium}) = \\frac{1}{1 + \\exp(-z)}$$\n\n")
 
 cat("Where $z$ is resolved as:\n\n")
@@ -606,7 +572,7 @@ cat("\\end{aligned}$$\n\n")
 ```
 
 ```{r lasso_pre_stacked, results='asis'}
-b0_pre   <- -3.245 
+b0_pre   <- res$pre_intercept %||% -3.245
 
 coefs_pre_active <- res$coefs_pre |> 
   filter(Beta != 0, Predictor != "(Intercept)")
@@ -629,7 +595,7 @@ cat(paste(terms_pre_stacked, collapse = "\n"))
 cat("\\end{aligned}$$\n\n")
 ```
 ```{r lasso_post_stacked, results='asis'}
-b0_post  <- -3.512 
+b0_post  <- res$post_intercept %||% -3.512
 
 coefs_post_active <- res$coefs_post |> 
   filter(Beta != 0, Predictor != "(Intercept)")
@@ -642,7 +608,7 @@ terms_post_stacked <- purrr::map2_chr(
     sprintf("  & %s %.3f \\times \\text{%s} \\\\", sign_str, abs(beta), label)
   }
 )
-cat("Post-operative LASSO Model:")
+cat("Intraoperative LASSO Model:")
 
 cat("$$P(\\text{Delirium}) = \\frac{1}{1 + \\exp(-z)}$$\n\n")
 
@@ -677,7 +643,7 @@ p_imp_pre <- xgb.ggplot.importance(relabel_importance(imp_pre), top_n = 12) +
 
 p_imp_post <- xgb.ggplot.importance(relabel_importance(imp_post), top_n = 12) +
   theme_classic(base_family = "serif") +
-  labs(title = "B. Post-operative XGBoost", x = NULL, y = "Information Gain") +
+  labs(title = "B. Intraoperative XGBoost", x = NULL, y = "Information Gain") +
   theme(
     legend.position = "none",
     plot.title = element_text(face = "bold", size = 10),
@@ -700,7 +666,7 @@ ggsave(here("outputs", "figures", "supplementary", "figureS3_xgb_importance.png"
        width = 180, height = 90, units = "mm", dpi = 300)
 ```
 
-## Supplementary Figure 4: Calibration Curves (Uncalibrated)
+## Figure 2: Calibration after cross-validated recalibration (validation cohort)
 ```{r calibration_curves_raw_supp, fig.height=8, fig.width=12}
 # Calibration Curves (Validation Cohort LOESS Fits - Uncalibrated / Raw)
 make_cal_plot_val_raw <- function(obs, pred, title) {
@@ -722,24 +688,20 @@ make_cal_plot_val_raw <- function(obs, pred, title) {
 }
 
 figS4_plot <- (
-  make_cal_plot_val_raw(res$obs_pre_val,  res$pred_lasso_pre_val,  "Pre-op LASSO")    +
-  make_cal_plot_val_raw(res$obs_pre_val,  res$pred_xgb_pre_val,    "Pre-op XGBoost") +
-  plot_spacer()
+  make_cal_plot_val_raw(y_val, preds_recal_cv[["Primary Model"]],    "Primary Model")  +
+  make_cal_plot_val_raw(y_val, preds_recal_cv[["Pre-op LASSO"]],     "Pre-op LASSO")   +
+  make_cal_plot_val_raw(y_val, preds_recal_cv[["Pre-op XGBoost"]],   "Pre-op XGBoost")
 ) / (
-  make_cal_plot_val_raw(res$obs_post_val, res$pred_lasso_post_val, "Post-op LASSO")    +
-  make_cal_plot_val_raw(res$obs_post_val, res$pred_xgb_post_val,   "Post-op XGBoost") +
-  make_cal_plot_val_raw(res$obs_core_val, res$pred_l_core_val,     "Parsimonious Model")
-) +
-  plot_annotation(
-    title    = "Raw Uncalibrated Calibration Properties on Validation Cohort",
-    theme = theme(plot.title = element_text(family = "serif", face = "bold", size = 10), plot.subtitle = element_text(family = "serif", size = 9))
-  )
+  make_cal_plot_val_raw(y_val, preds_recal_cv[["Intra-op LASSO"]],   "Intra-op LASSO")   +
+  make_cal_plot_val_raw(y_val, preds_recal_cv[["Intra-op XGBoost"]], "Intra-op XGBoost") +
+  plot_spacer()
+)
 
 figS4_plot
 
-ggsave(here("outputs", "figures", "supplementary", "figureS4_calibration_raw.svg"), plot = figS4_plot,
+ggsave(here("outputs", "figures", "main", "figure2_calibration_recalibrated.svg"), plot = figS4_plot,
        width = 180, height = 120, units = "mm", device = "svg")
-ggsave(here("outputs", "figures", "supplementary", "figureS4_calibration_raw.png"), plot = figS4_plot,
+ggsave(here("outputs", "figures", "main", "figure2_calibration_recalibrated.png"), plot = figS4_plot,
        width = 180, height = 120, units = "mm", dpi = 300)
 ```
 
@@ -782,7 +744,7 @@ prev_table
 ## Supplementary Table 2: Candidate Predictor Summary
 ```{r candidate_predictors}
 pred_table <- tibble::tribble(
-  ~Predictor,                         ~`Pre-op LASSO`, ~`Post-op LASSO`, ~`GLM Model`,
+  ~Predictor,                         ~`Pre-op models`, ~`Intra-op models`, ~`Primary model`,
   "Age, years",                        "✓", "✓", "✓",
   "Sex",                               "✓", "✓", "",
   "BMI, kg/m²",                        "✓", "✓", "",
@@ -792,7 +754,8 @@ pred_table <- tibble::tribble(
   "Respiratory disease",               "✓", "✓", "",
   "CNS/neurological disease",          "✓", "✓", "",
   "Urinary tract disease",             "✓", "✓", "",
-  "Dementia diagnosis",                "✓", "✓", "✓",
+  "Pre-existing dementia",             "✓", "✓", "✓",
+  "MMSE score",                        "✓", "✓", "",
   "Education level",                   "✓", "✓", "",
   "pH missingness indicator",          "✓", "✓", "",
   "Temperature, °C",                   "✓", "✓", "",
@@ -810,6 +773,10 @@ pred_table <- tibble::tribble(
   "ALT, U/L",                          "✓", "✓", "",
   "AST, U/L",                          "✓", "✓", "",
   "Oxygen saturation, %",              "✓", "✓", "",
+  "Arterial pH",                       "✓", "✓", "",
+  "PaO₂, kPa",                         "✓", "✓", "",
+  "PaCO₂, kPa",                        "✓", "✓", "",
+  "Bicarbonate, mmol/L",               "✓", "✓", "",
   "Anaesthesia type (TIVA/Volatile/Regional)", "", "✓", "",
   "Intra-operative hypotension",       "",  "✓", "",
   "Hypotension requiring medication",  "",  "✓", "",
@@ -824,10 +791,15 @@ pred_table |>
   theme_booktabs() |>
   bold(part = "header") |>
   align(align = "center", j = 2:4, part = "all") |>
-  bg(i = ~ `Pre-op LASSO` == "" & `Post-op LASSO` == "", j = 1:4, bg = "#f8f8f8") |>
+  bg(i = ~ `Pre-op models` == "" & `Intra-op models` == "", j = 1:4, bg = "#f8f8f8") |>
   set_caption("Table S2. Candidate predictors made available to each model by timing of availability") |>
-  add_footer_lines("✓ = predictor made available to this model") |>
-  autofit() |>
+  add_footer_lines(paste0(
+    "✓ = predictor made available to this model. Pre-op and intra-op models = the LASSO and XGBoost models ",
+    "for each time point, which shared the same candidate predictors. Missing continuous values were imputed ",
+    "with derivation-cohort medians; the arterial blood gas variables are accompanied by the pH missingness indicator."
+  )) |>
+  fontsize(size = 9, part = "all") |>
+  fixed_widths(c(3.6, 0.9, 0.9, 0.9)) |>
   (\(x) {
     flextable::save_as_docx(x, path = here("outputs", "tables", "supplementary", "tableS2_candidate_predictors.docx"))
     x
@@ -869,9 +841,18 @@ get_stats_by_cohort <- function(v_name, df) {
               (is.numeric(v) && all(v_clean %in% c(0, 1, 1L, 0L)))
               
     if (is_cat) {
-      n_yes <- sum(v_clean == 1 | v_clean == TRUE | v_clean == "Female" | v_clean == "Yes", na.rm = TRUE)
-      stats <- paste0(n_yes, " (", round(n_yes / n_valid * 100, 1), "%)")
-      rng   <- "—"  
+      positive_labels <- c("1", "TRUE", "Female", "Yes")
+      if (any(as.character(v_clean) %in% positive_labels)) {
+        n_yes <- sum(v_clean == 1 | v_clean == TRUE | v_clean == "Female" | v_clean == "Yes", na.rm = TRUE)
+        stats <- paste0(n_yes, " (", round(n_yes / n_valid * 100, 1), "%)")
+      } else {
+        # not a recognised binary-positive label (e.g. fracture type) -- report
+        # the modal category by name rather than a meaningless 0 count
+        tab      <- sort(table(v_clean), decreasing = TRUE)
+        top_level <- names(tab)[1]
+        stats    <- paste0(top_level, ", ", tab[1], " (", round(tab[1] / n_valid * 100, 1), "%)")
+      }
+      rng   <- "—"
     } else {
       v_num <- as.numeric(v_clean)
       stats <- paste0(round(mean(v_num), 1), " (", round(sd(v_num), 1), ")")
@@ -922,7 +903,7 @@ overview_df <- all_model_vars |>
       "cns"                   ~ "CNS/neurological disease",
       "urinary_tract"         ~ "Urinary tract disease",
       "cog_mmse_pre"          ~ "MMSE score (pre-operative)",
-      "cog_pre_dementia_flag" ~ "Dementia diagnosis",
+      "cog_pre_dementia_flag" ~ "Pre-existing dementia",
       "temp_t0"               ~ "Temperature, \u00b0C",
       "sysbp_t0"              ~ "Systolic BP, mmHg",
       "diabp_t0"              ~ "Diastolic BP, mmHg",
@@ -997,85 +978,120 @@ tableS3
 
 ## Supplementary Table 4: Delirium Incidence by Centre
 ```{r incidence_by_centre}
-ft_centre <- by_centre_table |>
+ft_centre <- cohort_raw_unimputed |>
+  group_by(Centre = centre) |>
+  summarise(
+    n = n(),
+    `Delirium, n` = sum(delirium_7d == 1, na.rm = TRUE),
+    `Delirium incidence, %` = sprintf("%.1f", 100 * mean(delirium_7d == 1, na.rm = TRUE)),
+    `Missing outcome, n` = sum(is.na(delirium_7d)),
+    .groups = "drop"
+  ) |>
+  arrange(desc(n)) |>
+  flextable() |>
   journal_table(
     caption  = "Table S4. Delirium incidence by recruiting centre",
-    footnote = "Incidence expressed as proportion of patients developing delirium within 7 days."
-  )
+    footnote = "Incidence is the percentage of patients with delirium within 7 days of surgery."
+  ) |>
+  fixed_widths(c(3.1, 0.6, 0.8, 0.9, 0.9))
 
 # Save to your supplementary tables folder
 flextable::save_as_docx(ft_centre, path = here("outputs", "tables", "supplementary", "tableS4_incidence_by_centre.docx"))
 ft_centre
 ```
 
-# Supplementary Table 5: Threshold metrics (recalibrated) 
-```{r clinical_threshold_metrics_recalibrated}
-calculate_threshold_metrics <- function(obs, pred, threshold) {
-  keep <- !is.na(obs) & !is.na(pred)
-  obs  <- obs[keep]; pred <- pred[keep]
-  n    <- length(obs)
-  
-  pred_class  <- if_else(pred >= threshold, 1, 0)
-  obs_numeric <- as.numeric(as.character(obs))
-  
-  tp <- sum(pred_class == 1 & obs_numeric == 1)
-  fp <- sum(pred_class == 1 & obs_numeric == 0)
-  tn <- sum(pred_class == 0 & obs_numeric == 0)
-  fn <- sum(pred_class == 0 & obs_numeric == 1)
-  
-  sens <- tp / max(1, (tp + fn))
-  spec <- tn / max(1, (tn + fp))
-  ppv  <- tp / max(1, (tp + fp))
-  npv  <- tn / max(1, (tn + fn))
-  
-  nb   <- (tp / n) - (fp / n) * (threshold / (1 - threshold))
-  
-  tibble(
-    Sensitivity = sprintf("%.1f%%", sens * 100),
-    Specificity = sprintf("%.1f%%", spec * 100),
-    PPV         = sprintf("%.1f%%", ppv * 100),
-    NPV         = sprintf("%.1f%%", npv * 100),
-    `Net Benefit` = sprintf("%.3f", nb)
+# Supplementary Table 5: Threshold metrics and net benefit
+```{r clinical_threshold_metrics}
+s5_data <- nb_table |>
+  filter(Model != "Treat all") |>
+  mutate(
+    Model = factor(Model, levels = model_order),
+    Predictions = if_else(Predictions == "Original", "Models as developed", "After cross-validated recalibration"),
+    Predictions = factor(Predictions, levels = c("Models as developed", "After cross-validated recalibration"))
+  ) |>
+  arrange(Predictions, threshold, Model) |>
+  left_join(
+    nb_table |> filter(Model == "Treat all") |> select(threshold, NB_all = NB),
+    by = "threshold"
+  ) |>
+  transmute(
+    Predictions = as.character(Predictions),
+    Threshold   = sprintf("%.0f%%", threshold * 100),
+    Model       = as.character(Model),
+    `Above threshold, %` = sprintf("%.1f", Flagged_Pct * 100),
+    Sensitivity = sprintf("%.1f%%", Sensitivity * 100),
+    Specificity = sprintf("%.1f%%", Specificity * 100),
+    PPV         = if_else(is.na(PPV), "—", sprintf("%.1f%%", PPV * 100)),
+    NPV         = sprintf("%.1f%%", NPV * 100),
+    `Net benefit (95% CI)` = fmt_ci(NB, NB_LCI, NB_UCI, 3),
+    `Treat all` = sprintf("%.3f", NB_all)
   )
-}
 
-calc_all_thresholds_recal <- function(threshold) {
-  bind_rows(
-    calculate_threshold_metrics(rc$core_obs,       rc$core_recal,       threshold) |> mutate(Model = "Parsimonious Model"),
-    calculate_threshold_metrics(rc$pre_lasso_obs,  rc$pre_lasso_recal,  threshold) |> mutate(Model = "Pre-op LASSO"),
-    calculate_threshold_metrics(rc$pre_xgb_obs,    rc$pre_xgb_recal,    threshold) |> mutate(Model = "Pre-op XGBoost"),
-    calculate_threshold_metrics(rc$post_lasso_obs, rc$post_lasso_recal, threshold) |> mutate(Model = "Post-op LASSO"),
-    calculate_threshold_metrics(rc$post_xgb_obs,   rc$post_xgb_recal,   threshold) |> mutate(Model = "Post-op XGBoost")
-  ) |> select(Model, Sensitivity, Specificity, PPV, NPV, `Net Benefit`)
-}
-
-threshold_table_data <- bind_rows(
-  calc_all_thresholds_recal(0.05) |> mutate(Threshold = "5% Risk Threshold"),
-  calc_all_thresholds_recal(0.10) |> mutate(Threshold = "10% Risk Threshold"),
-  calc_all_thresholds_recal(0.15) |> mutate(Threshold = "15% Risk Threshold")
-) |> select(Threshold, Model, Sensitivity, Specificity, PPV, NPV, `Net Benefit`)
-
-ft5 <- threshold_table_data |>
+ft5 <- s5_data |>
   flextable() |>
   theme_booktabs() |>
   bold(part = "header") |>
   font(fontname = "Arial", part = "all") |>
-  fontsize(size = 9, part = "all") |>
+  fontsize(size = 8, part = "all") |>
   align(align = "center", part = "header") |>
-  align(align = "left",   j = 1:2, part = "body") |>
-  align(align = "center", j = 3:7, part = "body") |>
-  merge_v(j = 1) |>
-  valign(j = 1, valign = "top") |>
-  hline(i = c(5, 10), border = officer::fp_border(color = "#CCCCCC", width = 0.5)) |>
-  set_caption("Table S5. Bedside decision classification performance and Net Benefit evaluated on the independent external validation cohort") |>
+  align(align = "left",   j = 1:3, part = "body") |>
+  align(align = "center", j = 4:10, part = "body") |>
+  merge_v(j = c(1, 2, 10)) |>
+  valign(j = c(1, 2, 10), valign = "top") |>
+  hline(i = seq(5, nrow(s5_data) - 1, by = 5), border = officer::fp_border(color = "#CCCCCC", width = 0.5)) |>
+  set_caption("Table S5. Classification performance and net benefit at clinically relevant risk thresholds in the validation cohort") |>
   add_footer_lines(paste0(
-    "Performance evaluated using logistic recalibrated probabilities on the validation sub-cohort. ",
-    "Net Benefit is calculated as (True Positives / N) - (False Positives / N) * (Threshold / (1 - Threshold))."
+    "Above threshold: patients with predicted risk at or above the threshold. Net benefit 95% CIs by bootstrap. ",
+    "Recalibration was logistic, cross-validated within the validation cohort. As developed, no XGBoost prediction ",
+    "reached 10% (maximum 8% and 9%)."
   )) |>
   italic(part = "footer") |>
-  fontsize(size = 8.5, part = "footer") |>
-  autofit()
+  fontsize(size = 7.5, part = "footer") |>
+  fixed_widths(c(1.35, 0.65, 1.1, 0.7, 0.8, 0.8, 0.65, 0.65, 1.45, 0.6))
 
-flextable::save_as_docx(ft5, path = here("outputs", "tables", "supplementary", "tableS5_clinical_thresholds.docx"))
+flextable::save_as_docx(
+  ft5,
+  path = here("outputs", "tables", "supplementary", "tableS5_clinical_thresholds.docx"),
+  pr_section = officer::prop_section(page_size = officer::page_size(orient = "landscape"))
+)
 ft5
 ```
+
+# Supplementary Table 6: Detailed validation metrics
+```{r validation_detail}
+y_val_s6 <- as.integer(res$obs_core_val)
+brier_null <- mean(y_val_s6) * (1 - mean(y_val_s6))   # Brier of predicting the cohort incidence for everyone
+
+s6_data <- val_metrics |>
+  left_join(auc_diff, by = "Model") |>
+  mutate(Model = factor(Model, levels = model_order)) |>
+  arrange(Model) |>
+  transmute(
+    Model = as.character(Model),
+    `Brier (95% CI)`       = fmt_ci(Brier, Brier_LCI, Brier_UCI, 3, "
+"),
+    `O:E (95% CI)`         = fmt_ci(OE, OE_LCI, OE_UCI, 2, "
+"),
+    `ICI (95% CI)`         = fmt_ci(ICI, ICI_LCI, ICI_UCI, 3, "
+"),
+    `AUROC difference from primary model (95% CI)` = if_else(is.na(Diff), "—", fmt_ci(Diff, LCI, UCI, 3, "
+"))
+  )
+
+ft6 <- s6_data |>
+  flextable() |>
+  theme_booktabs() |>
+  bold(part = "header") |>
+  font(fontname = "Arial", part = "all") |>
+  fontsize(size = 8, part = "all") |>
+  align(align = "center", part = "header") |>
+  align(align = "center", j = 2:5, part = "body") |>
+  set_caption("Table S6. Brier score, observed:expected ratio and integrated calibration index in the validation cohort, and AUROC difference from the primary model") |>
+  add_footer_lines("O:E, observed:expected events; ICI, integrated calibration index. Confidence intervals by bootstrap.") |>
+  fontsize(size = 7.5, part = "footer") |>
+  fixed_widths(c(1.3, 1.3, 1.3, 1.3, 1.6))
+
+flextable::save_as_docx(ft6, path = here("outputs", "tables", "supplementary", "tableS6_validation_detail.docx"))
+ft6
+```
+

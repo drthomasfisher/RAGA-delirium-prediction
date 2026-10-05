@@ -60,3 +60,7 @@ scripts/archive/
 !scripts/
 !scripts/**/*.R
 !scripts/**/*.Rmd
+# ==========================================
+# 7. Reviewer-reserve analyses (kept private; must follow the whitelist above)
+# ==========================================
+scripts/reserve/
