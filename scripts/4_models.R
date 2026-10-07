@@ -1,4 +1,4 @@
-# 4_MODELS.R  —  Model Derivation and External Validation
+# 4_models.R: model derivation and internal validation
 
 # ---- 1. SETUP 
 library(tidyverse)
@@ -216,8 +216,7 @@ get_optimism_corrected_auc_glm <- function(df, n_boot = 1000) {
   summarise_boot(orig_auc, boot)
 }
 
-# The number of boosting rounds is re-tuned by cross-validation inside every replicate
-# (fit_xgb with nrounds = NULL), so tuning is part of what the bootstrap corrects for.
+# nrounds = NULL so the number of rounds is re-tuned in every replicate
 get_optimism_corrected_auc_xgb <- function(df, X_orig, y_orig, fit_orig, n_boot = 1000) {
   p_hat        <- predict(fit_orig, xgb.DMatrix(X_orig))
   apparent_auc <- auc_of(y_orig, p_hat)
@@ -286,8 +285,7 @@ extract_lasso_coefs <- function(model, X, y, n_boot = 1000) {
   return(boot_df)
 }
 
-# groups: original patient index for bootstrap samples, so that every copy of a patient
-# falls in the same CV fold (otherwise duplicates leak across folds and lambda is too small)
+# groups = original patient index, so copies of a patient stay in the same CV fold
 grouped_folds <- function(groups, k) {
   ug <- unique(groups)
   sample(rep_len(seq_len(k), length(ug)))[match(groups, ug)]
@@ -323,9 +321,8 @@ calib_slope <- function(y, p) {
 
 auc_of <- function(y, p) as.numeric(pROC::roc(y, p, quiet = TRUE)$auc)
 
-# Harrell bootstrap summary: optimism in AUC, calibration slope of each bootstrap model
-# applied to the original data (i.e. the shrinkage estimate), and prediction instability
-# (mean absolute difference between bootstrap-model and final-model predictions, per patient)
+# Optimism in AUC, calibration slope of the bootstrap models on the original data,
+# and mean absolute prediction error against the final model
 summarise_boot <- function(apparent_auc, boot) {
   boot  <- Filter(Negate(is.null), boot)
   opt   <- vapply(boot, `[[`, numeric(1), "opt")
@@ -340,8 +337,7 @@ summarise_boot <- function(apparent_auc, boot) {
          n_boot                 = length(boot))
 }
 
-# Stability selection is repeated inside every bootstrap replicate, otherwise the
-# variable-selection step escapes the optimism correction entirely.
+# Stability selection is repeated in every replicate so selection is included in the correction
 get_optimism_corrected_auc_stab <- function(X, y, fit_orig, final_vars, n_boot = 200, n_reps = 100) {
   p_hat        <- as.numeric(predict(fit_orig, type = "response"))
   apparent_auc <- auc_of(y, p_hat)
@@ -434,9 +430,8 @@ xgb_params <- list(
 m_x_pre  <- fit_xgb(pre_X,  pre_xy$y)
 m_x_post <- fit_xgb(post_X, post_xy$y)
 
-# LASSO variable selection is unstable with this few events, so rather than
-# report one arbitrarily-seeded cv.glmnet fit, select variables by frequency across 100
-# resampled fits and refit an unpenalised GLM on whatever clears the 50% threshold.
+# LASSO selection is unstable with 40 events, so keep variables chosen in at least
+# 50% of 100 resampled fits and refit an unpenalised GLM
 message("Running LASSO stability selection (100 resamples)...")
 stab_pre  <- stability_select(pre_X,  pre_xy$y)
 stab_post <- stability_select(post_X, post_xy$y)
@@ -741,8 +736,7 @@ message("Success: sophisticated_results.RData saved.")
 NoSleepR::nosleep_off()
 
 
-# Sample size calculation (Riley et al., BMJ 2020). A priori anticipated Nagelkerke R2 of
-# 0.15 (i.e. 15% of the maximum Cox-Snell R2), not the apparent R2 of the fitted model.
+# Sample size (Riley et al. 2020), assuming a Nagelkerke R2 of 0.15
 library(pmsampsize)
 
 y  <- as.integer(as.character(sophisticated_results$obs_core))

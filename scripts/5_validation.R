@@ -1,8 +1,5 @@
-# 5_validation.R: validation metrics, paired comparisons, recalibration and decision curves
-#
-# Runs after 4_models.R. Everything here uses the validation-cohort predictions of the
-# models as developed; recalibration is done by cross-validation within the validation
-# cohort so recalibrated performance is not estimated in-sample.
+# 5_validation.R: validation metrics, paired AUROC comparisons, recalibration, decision curves
+# Runs after 4_models.R and uses the models as developed.
 
 library(tidyverse)
 library(pROC)
@@ -97,8 +94,7 @@ auc_diff <- imap_dfr(preds[-1], function(p, model) {
 print(auc_diff)
 
 # ---- 3. RECALIBRATION, CROSS-VALIDATED WITHIN THE VALIDATION COHORT ----
-# 10-fold, stratified by outcome, repeated 20 times; each patient's recalibrated risk is
-# the average over repeats of the prediction from a recalibration model that did not see them.
+# 10-fold CV stratified by outcome, 20 repeats; risks are averaged over repeats
 cv_recalibrate <- function(y, p, K = 10, R = 20) {
   lp  <- lp_of(p)
   out <- matrix(NA_real_, nrow = length(y), ncol = R)

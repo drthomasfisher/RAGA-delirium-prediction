@@ -1306,8 +1306,7 @@ cognitive_vars <- {block(data_translated, quote(
             cog_pre_delirium_type    = delirium_type(preoperative_delirium_classification),
             
             # 2. PRE-EXISTING DEMENTIA (baseline fields only) ---
-            # dementia_fo and dementia_alzm come from the follow-up assessment; including them
-            # flagged the 13 patients with newly diagnosed dementia after surgery as preoperative cases.
+            # follow-up dementia fields left out (they flagged 13 new post-operative diagnoses)
             cog_pre_dementia_flag = case_when(
               normalise_yes_no(is_there_cognitive_impairment_alzheimers_disease) == "TRUE" ~ "TRUE",
               normalise_yes_no(dementia_preop) == "TRUE" ~ "TRUE",

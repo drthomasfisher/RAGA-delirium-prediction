@@ -38,9 +38,7 @@ lab_vars <- c(
   "cog_mmse_pre", "urea_creat_ratio_t0"
 )
 
-# Arterial blood gas values (and the oxygen saturation that comes with them) were missing in
-# over half of patients, so they are kept for description (Supplementary Table S3) but not
-# offered to the models as candidate predictors.
+# Blood gas values and SpO2 are >50% missing: described in Table S3, not used as predictors
 abg_vars <- c("ph_t0", "po2_kpa_t0", "pco2_kpa_t0", "hco3_t0", "spo2_t0")
 
 # 3. SWIVEL AND CLEAN INTRA-OPERATIVE ANESTHETIC DRUGS & ADJUNCTS
