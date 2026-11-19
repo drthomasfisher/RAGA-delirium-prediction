@@ -437,11 +437,14 @@ background_vars <- {block(data_translated, quote(
             factor(levels = c("1","2","3","4","5"), ordered = FALSE),
 
             # Baseline comorbidities by system ---
-            cardiovascular   = normalise_yes_no(cardiovascular_system),
-            respiratory      = normalise_yes_no(respiratory_system),
-            gastrointestinal = normalise_yes_no(gastrointestinal_system),
-            urinary_tract    = normalise_yes_no(urinary_tract_system),
-            cns              = normalise_yes_no(central_nervous_system),
+            # The translated names of these five columns were shifted in the codebook, so map them
+            # by the original Chinese field: 循环系统 cardiovascular, 呼吸系统 respiratory,
+            # 消化系统 gastrointestinal, 泌尿系统 urinary, 精神及神经系统 CNS/psychiatric
+            cardiovascular   = normalise_yes_no(gastrointestinal_system),
+            respiratory      = normalise_yes_no(urinary_tract_system),
+            gastrointestinal = normalise_yes_no(central_nervous_system),
+            urinary_tract    = normalise_yes_no(respiratory_system),
+            cns              = normalise_yes_no(cardiovascular_system),
             hematologic      = normalise_yes_no(hematologic_system),
             other_comorb     = normalise_yes_no(other),
             
@@ -1305,10 +1308,8 @@ cognitive_vars <- {block(data_translated, quote(
             cog_pre_delirium_exists  = normalise_yes_no(before_surgery_whether_delirium_occurs),
             cog_pre_delirium_type    = delirium_type(preoperative_delirium_classification),
             
-            # 2. PRE-EXISTING DEMENTIA (baseline fields only) ---
-            # follow-up dementia fields left out (they flagged 13 new post-operative diagnoses)
+            # 2. PRE-EXISTING DEMENTIA: dementia.preop, the variable used in the RAGA analyses ---
             cog_pre_dementia_flag = case_when(
-              normalise_yes_no(is_there_cognitive_impairment_alzheimers_disease) == "TRUE" ~ "TRUE",
               normalise_yes_no(dementia_preop) == "TRUE" ~ "TRUE",
               TRUE ~ "FALSE"
             ),

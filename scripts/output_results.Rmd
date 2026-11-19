@@ -96,7 +96,7 @@ var_labels <- c(
   fracture_type          = "Fracture type",
   cardiovascular         = "Cardiovascular disease",
   respiratory            = "Respiratory disease",
-  cns                    = "CNS/neurological disease",
+  cns                    = "Neurological or psychiatric disease",
   urinary_tract          = "Urinary tract disease",
   cog_mmse_pre           = "MMSE score (pre-operative)",
   cog_pre_dementia_flag  = "Pre-existing dementia",
@@ -122,7 +122,7 @@ var_labels <- c(
   anaes_tiva                 = "Anaesthesia: TIVA",
   anaes_volatile             = "Anaesthesia: volatile",
   anaes_regional             = "Anaesthesia: regional",
-  duration_hrs               = "Surgical duration, hours",
+  duration_hrs               = "Anaesthesia duration, hours",
   estimated_blood_loss       = "Estimated blood loss, mL",
   blood_transfusion          = "Intra-operative blood transfusion",
   intraop_hypotension        = "Intra-operative hypotension",
@@ -311,7 +311,7 @@ build_table1_v4 <- function(df) {
     row("BMI (kg/m²)",          mean_sd, "bmi"),
     row("MMSE score",                mean_sd, "cog_mmse_pre"),
     row("Urea (mmol/L)",             mean_sd, "urea_t0"),
-    row("Surgical duration (hours)", mean_sd, "duration_hrs"),
+    row("Anaesthesia duration (hours)", mean_sd, "duration_hrs"),
     hdr("ASA status"),
     purrr::map_dfr(levels(df_clean$asa_status), \(lvl) row(paste0("   ", lvl), cat_pct, "asa_status", lvl)),
     hdr("Fracture type"),
@@ -320,7 +320,7 @@ build_table1_v4 <- function(df) {
     row("   Pre-existing dementia",  pct, "cog_pre_dementia_flag"),
     row("   Cardiovascular disease", pct, "cardiovascular"),
     row("   Respiratory disease",    pct, "respiratory"),
-    row("   CNS disease",            pct, "cns"),
+    row("   Neurological or psychiatric disease", pct, "cns"),
     row("   Urinary tract disease",  pct, "urinary_tract")
   )
 }
@@ -336,7 +336,7 @@ n_of <- function(cohort, del = NA) {
 
 # Divider positions
 header_rows <- which(t1$Variable %in% c(
-  "Age (years)", "Female sex", "BMI (kg/m²)", "MMSE score", "Urea (mmol/L)", "Surgical duration (hours)",
+  "Age (years)", "Female sex", "BMI (kg/m²)", "MMSE score", "Urea (mmol/L)", "Anaesthesia duration (hours)",
   "ASA status", "Fracture type", "Comorbidities"
 ))
 divider_after <- header_rows[-1] - 1
@@ -752,7 +752,7 @@ pred_table <- tibble::tribble(
   "Fracture type",                     "✓", "✓", "",
   "Cardiovascular disease",            "✓", "✓", "",
   "Respiratory disease",               "✓", "✓", "",
-  "CNS/neurological disease",          "✓", "✓", "",
+  "Neurological or psychiatric disease",          "✓", "✓", "",
   "Urinary tract disease",             "✓", "✓", "",
   "Pre-existing dementia",             "✓", "✓", "✓",
   "MMSE score",                        "✓", "✓", "",
@@ -775,7 +775,7 @@ pred_table <- tibble::tribble(
   "Intra-operative hypotension",       "",  "✓", "",
   "Hypotension requiring medication",  "",  "✓", "",
   "Estimated blood loss, mL",          "",  "✓", "",
-  "Surgical duration, hours",          "",  "✓", "",
+  "Anaesthesia duration, hours",          "",  "✓", "",
   "Blood transfusion",                 "",  "✓", "",
   "Intra-operative agents (Propofol, Sufentanil, Remifentanil, Fentanyl, Lidocaine, Ropivacaine, Bupivacaine, Atracurium, Rocuronium, Etomidate)", "", "✓", ""
 )
@@ -895,7 +895,7 @@ overview_df <- all_model_vars |>
       "fracture_type"         ~ "Fracture type",
       "cardiovascular"        ~ "Cardiovascular disease",
       "respiratory"           ~ "Respiratory disease",
-      "cns"                   ~ "CNS/neurological disease",
+      "cns"                   ~ "Neurological or psychiatric disease",
       "urinary_tract"         ~ "Urinary tract disease",
       "cog_mmse_pre"          ~ "MMSE score (pre-operative)",
       "cog_pre_dementia_flag" ~ "Pre-existing dementia",
@@ -1036,9 +1036,14 @@ ft5 <- s5_data |>
   hline(i = seq(5, nrow(s5_data) - 1, by = 5), border = officer::fp_border(color = "#CCCCCC", width = 0.5)) |>
   set_caption("Table S5. Classification performance and net benefit at clinically relevant risk thresholds in the validation cohort") |>
   add_footer_lines(paste0(
-    "Above threshold: patients with predicted risk at or above the threshold. Net benefit 95% CIs by bootstrap. ",
-    "Recalibration was logistic, cross-validated within the validation cohort. As developed, XGBoost predictions never ",
-    "reached 10% (maximum 9% and 8%)."
+    "Above threshold is the percentage of patients with a predicted risk at or above the threshold. ",
+    "Confidence intervals for net benefit were estimated by bootstrapping. Recalibrated predictions come from ",
+    "logistic recalibration fitted with cross-validation in the validation cohort. As developed, the highest ",
+    "predicted risks from the XGBoost models were ",
+    sprintf("%.1f%% (preoperative) and %.1f%% (intraoperative)",
+            100 * val_metrics$Max_Pred[val_metrics$Model == "Pre-op XGBoost"],
+            100 * val_metrics$Max_Pred[val_metrics$Model == "Intra-op XGBoost"]),
+    ", so almost no patients reached the 10% or 15% thresholds."
   )) |>
   italic(part = "footer") |>
   fontsize(size = 7.5, part = "footer") |>

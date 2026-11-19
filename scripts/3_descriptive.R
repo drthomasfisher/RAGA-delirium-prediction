@@ -106,9 +106,8 @@ intraop_vars <- c(
 )
 
 # 4. COHORT FILTERING (REWRITTEN FOR COHORT-SPECIFIC TRACKING)
-early_deaths <- master_list$outcomes$survival %>%
-  filter(survival_time_days < 7) %>%
-  pull(id)
+# No exclusion for early death: the RAGA dataset records mortality only at 1, 6 and 12 months
+# and 3 years, so deaths within 7 days cannot be identified in either cohort.
 
 cohort_filtered <- master %>%
   mutate(
@@ -132,35 +131,31 @@ cohort_filtered <- master %>%
 n0 <- nrow(cohort_filtered)
 c1 <- cohort_filtered %>% filter(delirium_preop_occurs == FALSE)
 n1 <- nrow(c1)
-c2 <- c1 %>% filter(!id %in% early_deaths)
-n2 <- nrow(c2)
-c3 <- c2 %>% filter(!is.na(delirium_7d))
+c3 <- c1 %>% filter(!is.na(delirium_7d))
 n3 <- nrow(c3)
 
 # Derivation cohort tracking
 deriv_n0 <- cohort_filtered %>% filter(cohort_assignment == "Derivation") %>% nrow()
 deriv_n1 <- c1 %>% filter(cohort_assignment == "Derivation") %>% nrow()
-deriv_n2 <- c2 %>% filter(cohort_assignment == "Derivation") %>% nrow()
 deriv_n3 <- c3 %>% filter(cohort_assignment == "Derivation") %>% nrow()
 
 # Validation cohort tracking
 valid_n0 <- cohort_filtered %>% filter(cohort_assignment == "Validation") %>% nrow()
 valid_n1 <- c1 %>% filter(cohort_assignment == "Validation") %>% nrow()
-valid_n2 <- c2 %>% filter(cohort_assignment == "Validation") %>% nrow()
 valid_n3 <- c3 %>% filter(cohort_assignment == "Validation") %>% nrow()
 
 # Build comprehensive split exclusion summary
 exclusion_summary <- tibble(
-  Step = c("Initial", "Baseline Delirium Excl", "Early Death Excl", "Missing Outcome Excl"),
+  Step = c("Initial", "Baseline Delirium Excl", "Missing Outcome Excl"),
   
-  Total_Remaining = c(n0, n1, n2, n3),
-  Total_Excluded  = c(0, n0 - n1, n1 - n2, n2 - n3),
+  Total_Remaining = c(n0, n1, n3),
+  Total_Excluded  = c(0, n0 - n1, n1 - n3),
   
-  Derivation_Remaining = c(deriv_n0, deriv_n1, deriv_n2, deriv_n3),
-  Derivation_Excluded  = c(0, deriv_n0 - deriv_n1, deriv_n1 - deriv_n2, deriv_n2 - deriv_n3),
+  Derivation_Remaining = c(deriv_n0, deriv_n1, deriv_n3),
+  Derivation_Excluded  = c(0, deriv_n0 - deriv_n1, deriv_n1 - deriv_n3),
   
-  Validation_Remaining = c(valid_n0, valid_n1, valid_n2, valid_n3),
-  Validation_Excluded  = c(0, valid_n0 - valid_n1, valid_n1 - valid_n2, valid_n2 - valid_n3)
+  Validation_Remaining = c(valid_n0, valid_n1, valid_n3),
+  Validation_Excluded  = c(0, valid_n0 - valid_n1, valid_n1 - valid_n3)
 )
 
 print(exclusion_summary)
@@ -392,5 +387,3 @@ save(
   bio_flagged_readable,
   file = here::here("data_interim", "results_descriptive.RData")
 )
-
-message("✅ Success: Descriptive validation structures preserved.")
