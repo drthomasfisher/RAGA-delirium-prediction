@@ -180,4 +180,4 @@ print(nb_table |> filter(Predictions == "Original"), n = Inf)
 
 save(val_metrics, auc_diff, recal_summary, preds_recal_cv, dca_curves, nb_table,
      file = here("data_interim", "validation_results.RData"))
-message("Success: validation_results.RData saved.")
+message("Saved validation_results.RData")

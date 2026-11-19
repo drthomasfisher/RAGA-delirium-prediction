@@ -541,7 +541,7 @@ if (length(lab_cols_present) > 0 && "delirium_7d" %in% names(lab_src)) {
          subtitle = "Red = Linear (logistic) | Blue = Non-linear (GAM)",
          y = "Delirium Probability", x = "Value")
 } else {
-  message("Lab columns or outcome not available — skipping lab plots.")
+  message("Lab columns or outcome not available, skipping lab plots.")
 }
 
 ```
@@ -788,8 +788,8 @@ pred_table |>
   bg(i = ~ `Pre-op models` == "" & `Intra-op models` == "", j = 1:4, bg = "#f8f8f8") |>
   set_caption("Table S2. Candidate predictors made available to each model by timing of availability") |>
   add_footer_lines(paste0(
-    "✓ = predictor made available to this model. Pre-op and intra-op models = the LASSO and XGBoost models ",
-    "for each time point, which shared the same candidate predictors. Missing continuous values were imputed ",
+    "✓ indicates that the predictor was available to the model. At each time point the LASSO and XGBoost models ",
+    "shared the same candidate predictors. Missing continuous values were imputed ",
     "with derivation-cohort medians. Arterial blood gas values (pH, PaO₂, PaCO₂, bicarbonate, oxygen saturation) were not offered to the models because they were missing in over half of patients (Table S3)."
   )) |>
   fontsize(size = 9, part = "all") |>
@@ -1085,7 +1085,7 @@ ft6 <- s6_data |>
   align(align = "center", part = "header") |>
   align(align = "center", j = 2:4, part = "body") |>
   set_caption("Table S6. Brier score and integrated calibration index in the validation cohort, and AUROC difference from the primary model") |>
-  add_footer_lines("ICI, integrated calibration index. Confidence intervals by bootstrap.") |>
+  add_footer_lines("ICI, integrated calibration index. Confidence intervals were estimated by bootstrapping.") |>
   fontsize(size = 7.5, part = "footer") |>
   fixed_widths(c(1.5, 1.5, 1.5, 2.0))
 

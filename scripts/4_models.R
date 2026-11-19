@@ -430,7 +430,7 @@ xgb_params <- list(
 m_x_pre  <- fit_xgb(pre_X,  pre_xy$y)
 m_x_post <- fit_xgb(post_X, post_xy$y)
 
-# LASSO selection is unstable with 40 events, so keep variables chosen in at least
+# LASSO selection is unstable with so few events, so keep variables chosen in at least
 # 50% of 100 resampled fits and refit an unpenalised GLM
 message("Running LASSO stability selection (100 resamples)...")
 stab_pre  <- stability_select(pre_X,  pre_xy$y)
@@ -521,7 +521,7 @@ internal_validation <- bind_rows(
 )
 print(internal_validation)
 
-# ---- 8. PERFORMANCE TABLE (LOCO-FREE VERSION) ----
+# ---- 8. PERFORMANCE TABLE ----
 message("=== Generating final performance table ===")
 
 # 1. Compile optimism lookup for the machine learning models
@@ -732,7 +732,7 @@ sophisticated_results <- list(
 )
 
 save(sophisticated_results, file = here("data_interim", "sophisticated_results.RData"))
-message("Success: sophisticated_results.RData saved.")
+message("Saved sophisticated_results.RData")
 NoSleepR::nosleep_off()
 
 

@@ -11,7 +11,7 @@ suppressPackageStartupMessages({
   library(visdat)
 })
 
-# 2. LOAD & DEEP JOIN
+# 2. LOAD & JOIN
 message("Step 1: Loading Data...")
 master_list <- readRDS(here::here("data_interim", "master_list.rds"))
 
@@ -105,13 +105,13 @@ intraop_vars <- c(
   new_drug_vars 
 )
 
-# 4. COHORT FILTERING (REWRITTEN FOR COHORT-SPECIFIC TRACKING)
+# 4. COHORT FILTERING
 # No exclusion for early death: the RAGA dataset records mortality only at 1, 6 and 12 months
 # and 3 years, so deaths within 7 days cannot be identified in either cohort.
 
 cohort_filtered <- master %>%
   mutate(
-    # Set cohort assignment immediately to allow split exclusion tracking
+    # Assign cohort first so exclusions can be counted per cohort
     cohort_assignment = if_else(
       grepl("^1", as.character(id)), 
       "Derivation", 
@@ -144,7 +144,7 @@ valid_n0 <- cohort_filtered %>% filter(cohort_assignment == "Validation") %>% nr
 valid_n1 <- c1 %>% filter(cohort_assignment == "Validation") %>% nrow()
 valid_n3 <- c3 %>% filter(cohort_assignment == "Validation") %>% nrow()
 
-# Build comprehensive split exclusion summary
+# Exclusions by cohort
 exclusion_summary <- tibble(
   Step = c("Initial", "Baseline Delirium Excl", "Missing Outcome Excl"),
   
